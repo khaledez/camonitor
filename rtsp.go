@@ -184,6 +184,10 @@ func (rc *rtspConn) handshake() error {
 		return fmt.Errorf("DESCRIBE: %w", err)
 	}
 
+	// One-shot SDP dump for v0.3.6 — used to discover what audio media the
+	// camera advertises before we write the real audio path.
+	log.Printf("=== SDP from %s ===\n%s=== end SDP ===", redact(rc.requestURI), string(desc.body))
+
 	// PLAY targets the session URI, which is Content-Base when present and
 	// the original request URI otherwise (RFC 2326 C.1.1).
 	sessionURI := rc.requestURI.String()
