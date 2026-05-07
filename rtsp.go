@@ -10,12 +10,12 @@
 //   - RTSP/1.0 OPTIONS / DESCRIBE / SETUP / PLAY
 //   - HTTP Digest authentication (Dahua's default for cameras)
 //   - TCP-interleaved RTP transport on the same socket as RTSP control
-//   - One H.264 video media per stream (audio is intentionally out of scope)
+//   - H.264 video plus optional audio media per stream
+//   - Periodic OPTIONS keepalive: Dahua does NOT reset its RTSP session
+//     timer on inbound RTP, so an unattended stream gets dropped every
+//     ~80–90s without explicit keepalive.
 //
-// What it does NOT support: UDP transport, RTP/SAVP, multicast, redirects,
-// keepalive (Dahua resets its session timer on inbound RTP, so a continuous
-// stream is its own keepalive — if the link goes idle long enough to drop,
-// runRTSPReader will reconnect).
+// What it does NOT support: UDP transport, RTP/SAVP, multicast, redirects.
 package main
 
 import (
@@ -31,17 +31,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/rtp"
 )
 
 const (
-	rtspDefaultPort = "554"
-	rtspIOTimeout   = 10 * time.Second
-	rtpReadIdle     = 30 * time.Second // packet-to-packet read deadline once PLAYing
-	minBackoff      = 1 * time.Second
-	maxBackoff      = 30 * time.Second
+	rtspDefaultPort   = "554"
+	rtspIOTimeout     = 10 * time.Second
+	rtpReadIdle       = 30 * time.Second // packet-to-packet read deadline once PLAYing
+	keepaliveInterval = 30 * time.Second // Dahua's default RTSP session timeout is ~60s
+	minBackoff        = 1 * time.Second
+	maxBackoff        = 30 * time.Second
 
 	// TCP-interleaved channel numbers we request in SETUP. Each media gets
 	// a pair (RTP, RTCP). Two SETUPs use channels 0/1 for video and 2/3
@@ -139,6 +141,30 @@ func streamOnce(ctx context.Context, s StreamConfig, subtype int, targets stream
 	log.Printf("[%s] connected to %s; H.264 video%s",
 		s.ID, redact(u),
 		map[bool]string{true: " + audio", false: ""}[hasAudio])
+
+	// Fire-and-forget keepalive ticker. The OPTIONS response comes back
+	// interleaved with RTP frames and is silently consumed by
+	// readInterleaved's "non-$ first byte" branch.
+	stopKeepalive := make(chan struct{})
+	go func() {
+		t := time.NewTicker(keepaliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopKeepalive:
+				return
+			case <-t.C:
+				if err := rc.sendKeepalive(); err != nil {
+					log.Printf("[%s] keepalive: %v", s.ID, err)
+					return
+				}
+			}
+		}
+	}()
+	defer close(stopKeepalive)
+
 	return rc.readPackets(targets)
 }
 
@@ -161,6 +187,10 @@ type rtspConn struct {
 	requestURI *url.URL
 	user, pass string
 
+	// writeMu serializes writes on conn (and the cseq counter). The read
+	// loop in readPackets does not contend on this — TCP is full-duplex
+	// and read deadlines are independent of write deadlines.
+	writeMu sync.Mutex
 	cseq    int
 	session string // returned in SETUP, sent on subsequent requests
 
@@ -366,11 +396,13 @@ func (rc *rtspConn) do(method, uri string, headers map[string]string) (*rtspResp
 }
 
 func (rc *rtspConn) send(method, uri string, headers map[string]string) (*rtspResponse, error) {
+	rc.writeMu.Lock()
 	rc.cseq++
+	cseq := rc.cseq
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s %s RTSP/1.0\r\n", method, uri)
-	fmt.Fprintf(&b, "CSeq: %d\r\n", rc.cseq)
+	fmt.Fprintf(&b, "CSeq: %d\r\n", cseq)
 	b.WriteString("User-Agent: camonitor/1\r\n")
 	if rc.session != "" && headers["Session"] == "" {
 		fmt.Fprintf(&b, "Session: %s\r\n", rc.session)
@@ -381,16 +413,44 @@ func (rc *rtspConn) send(method, uri string, headers map[string]string) (*rtspRe
 	b.WriteString("\r\n")
 
 	if err := rc.conn.SetWriteDeadline(time.Now().Add(rtspIOTimeout)); err != nil {
+		rc.writeMu.Unlock()
 		return nil, err
 	}
-	if _, err := rc.conn.Write([]byte(b.String())); err != nil {
-		return nil, err
+	_, werr := rc.conn.Write([]byte(b.String()))
+	rc.writeMu.Unlock()
+	if werr != nil {
+		return nil, werr
 	}
 
 	if err := rc.conn.SetReadDeadline(time.Now().Add(rtspIOTimeout)); err != nil {
 		return nil, err
 	}
 	return readResponse(rc.br)
+}
+
+// sendKeepalive fires an OPTIONS to reset the camera's RTSP session timer.
+// It is fire-and-forget: the response will arrive interleaved with RTP
+// frames and is silently consumed by readPackets / readInterleaved. Called
+// from a ticker goroutine while readPackets is blocked on the read loop —
+// safe because writes are serialized through writeMu and TCP is duplex.
+func (rc *rtspConn) sendKeepalive() error {
+	rc.writeMu.Lock()
+	defer rc.writeMu.Unlock()
+	rc.cseq++
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "OPTIONS %s RTSP/1.0\r\n", rc.requestURI.String())
+	fmt.Fprintf(&b, "CSeq: %d\r\n", rc.cseq)
+	if rc.session != "" {
+		fmt.Fprintf(&b, "Session: %s\r\n", rc.session)
+	}
+	b.WriteString("User-Agent: camonitor/1\r\n\r\n")
+
+	if err := rc.conn.SetWriteDeadline(time.Now().Add(rtspIOTimeout)); err != nil {
+		return err
+	}
+	_, err := rc.conn.Write([]byte(b.String()))
+	return err
 }
 
 func readResponse(br *bufio.Reader) (*rtspResponse, error) {
