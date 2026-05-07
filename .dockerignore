@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.dockerignore
+LICENSE
+README.md
+config.json
+config.*.json
+*.swp
+.DS_Store
+.idea/
+.vscode/
+/camonitor
+/camonitor-*

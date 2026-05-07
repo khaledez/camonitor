@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Camonitor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0e0e10; color: #d6d6d6; font-family: system-ui, sans-serif; }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px; background: #161618; border-bottom: 1px solid #2a2a2e;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  #status { font-size: 12px; color: #888; }
+  #status.ok { color: #5ec97c; }
+  #status.err { color: #d97070; }
+  button {
+    background: #2a2a2e; color: #d6d6d6; border: 1px solid #3a3a3f;
+    border-radius: 4px; padding: 6px 10px; cursor: pointer; font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #34343a; }
+  button:disabled { opacity: 0.6; cursor: progress; }
+  .grid {
+    display: grid; gap: 6px; padding: 6px;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  }
+  .cell {
+    position: relative; background: #000; border: 1px solid #2a2a2e;
+    border-radius: 4px; overflow: hidden; aspect-ratio: 16 / 9;
+  }
+  .cell.selected { border-color: #5e8fc9; box-shadow: 0 0 0 2px #5e8fc940 inset; }
+  .cell video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+  .cell .label {
+    position: absolute; bottom: 6px; left: 6px;
+    background: rgba(0,0,0,.65); padding: 2px 6px; border-radius: 3px;
+    font-size: 12px; pointer-events: none;
+  }
+  .cell .door-btn {
+    position: absolute; top: 6px; right: 6px;
+    background: rgba(40,40,44,.85); border: 1px solid #4a4a52;
+  }
+  .cell .door-btn.success { background: #2d6a3e; border-color: #4a8d5e; }
+  .cell .door-btn.error   { background: #6a2d3e; border-color: #8d4a5e; }
+  .cell .quality-btn {
+    position: absolute; top: 6px; left: 6px;
+    background: rgba(40,40,44,.85); border: 1px solid #4a4a52;
+    min-width: 44px;
+    font-variant-numeric: tabular-nums;
+  }
+  .cell .quality-btn.hd { background: #2d4d6a; border-color: #4a6a8d; }
+  .cell .placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; color: #555; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Camonitor</h1>
+  <span id="status">disconnected</span>
+  <button id="reconnect">connect</button>
+</header>
+<div class="grid" id="grid"></div>
+
+<script>
+const statusEl = document.getElementById('status');
+const grid = document.getElementById('grid');
+const reconnectBtn = document.getElementById('reconnect');
+
+function setStatus(text, kind) {
+  statusEl.textContent = text;
+  statusEl.className = kind || '';
+}
+
+let pc = null;
+let selectedCell = null;
+
+function selectCell(cell) {
+  if (selectedCell) selectedCell.classList.remove('selected');
+  selectedCell = cell;
+  cell.classList.add('selected');
+}
+
+async function setQuality(streamId, quality, button) {
+  const previousQuality = button.dataset.quality;
+  button.disabled = true;
+  button.textContent = quality.toUpperCase() + '…';
+  try {
+    const res = await fetch(
+      '/stream/quality?id=' + encodeURIComponent(streamId) + '&quality=' + quality,
+      { method: 'POST' },
+    );
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(msg || ('http ' + res.status));
+    }
+    button.dataset.quality = quality;
+    button.classList.toggle('hd', quality === 'hd');
+    button.textContent = quality.toUpperCase();
+  } catch (err) {
+    console.error('quality switch failed:', err);
+    button.textContent = previousQuality.toUpperCase();
+    setStatus('quality switch failed: ' + err.message, 'err');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function openDoor(streamId, button) {
+  // Visual feedback: disable while in flight, then briefly indicate result.
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.classList.remove('success', 'error');
+  button.textContent = 'opening…';
+  try {
+    const res = await fetch('/door/open?id=' + encodeURIComponent(streamId), { method: 'POST' });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(msg || ('http ' + res.status));
+    }
+    button.textContent = 'opened';
+    button.classList.add('success');
+  } catch (err) {
+    console.error('door open failed:', err);
+    button.textContent = 'failed';
+    button.classList.add('error');
+    setStatus('door open failed: ' + err.message, 'err');
+  } finally {
+    setTimeout(() => {
+      button.textContent = originalText;
+      button.classList.remove('success', 'error');
+      button.disabled = false;
+    }, 1500);
+  }
+}
+
+async function connect() {
+  if (pc) {
+    try { pc.close(); } catch (_) {}
+    pc = null;
+  }
+  grid.innerHTML = '';
+  selectedCell = null;
+  setStatus('requesting offer…');
+
+  const offer = await fetch('/webrtc/offer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }).then(r => {
+    if (!r.ok) throw new Error('offer http ' + r.status);
+    return r.json();
+  });
+
+  // Build cells in the same order the server lists streams. ontrack events
+  // fire in transceiver/m-line order, which matches.
+  const cells = [];
+  for (const s of offer.streams) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.id = s.id;
+    cell.tabIndex = 0;
+    cell.addEventListener('click', () => selectCell(cell));
+
+    const placeholder = document.createElement('div');
+    placeholder.className = 'placeholder';
+    placeholder.textContent = 'waiting for video…';
+    cell.appendChild(placeholder);
+
+    const video = document.createElement('video');
+    video.autoplay = true; video.playsInline = true; video.muted = true;
+    cell.appendChild(video);
+
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = s.name || s.id;
+    cell.appendChild(label);
+
+    const qualityBtn = document.createElement('button');
+    qualityBtn.className = 'quality-btn';
+    const initialQuality = s.quality === 'sd' ? 'sd' : 'hd';
+    qualityBtn.dataset.quality = initialQuality;
+    qualityBtn.textContent = initialQuality.toUpperCase();
+    if (initialQuality === 'hd') qualityBtn.classList.add('hd');
+    qualityBtn.title = 'Toggle HD / SD for ' + (s.name || s.id);
+    qualityBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectCell(cell);
+      const next = qualityBtn.dataset.quality === 'hd' ? 'sd' : 'hd';
+      setQuality(s.id, next, qualityBtn);
+    });
+    cell.appendChild(qualityBtn);
+
+    const doorBtn = document.createElement('button');
+    doorBtn.className = 'door-btn';
+    doorBtn.textContent = 'open door';
+    doorBtn.title = 'Open door for ' + (s.name || s.id);
+    doorBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectCell(cell);
+      openDoor(s.id, doorBtn);
+    });
+    cell.appendChild(doorBtn);
+
+    grid.appendChild(cell);
+    cells.push({ video, placeholder });
+  }
+  if (grid.firstChild) selectCell(grid.firstChild);
+
+  pc = new RTCPeerConnection();
+
+  let trackIndex = 0;
+  pc.ontrack = (e) => {
+    const slot = cells[trackIndex++];
+    if (!slot) return;
+    slot.video.srcObject = e.streams[0] || new MediaStream([e.track]);
+    slot.placeholder.remove();
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') setStatus('connected', 'ok');
+    else if (pc.connectionState === 'failed') setStatus('failed', 'err');
+    else setStatus(pc.connectionState);
+  };
+
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  // Wait for local ICE gathering so we send a single complete answer.
+  await new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const timeout = setTimeout(resolve, 3000);
+    pc.addEventListener('icegatheringstatechange', () => {
+      if (pc.iceGatheringState === 'complete') {
+        clearTimeout(timeout); resolve();
+      }
+    });
+  });
+
+  const res = await fetch('/webrtc/answer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: offer.sessionId, sdp: pc.localDescription.sdp }),
+  });
+  if (!res.ok) throw new Error('answer http ' + res.status);
+  setStatus('handshake complete, awaiting media…');
+}
+
+reconnectBtn.addEventListener('click', () => {
+  connect().catch(err => {
+    console.error(err);
+    setStatus('error: ' + err.message, 'err');
+  });
+});
+
+connect().catch(err => {
+  console.error(err);
+  setStatus('error: ' + err.message, 'err');
+});
+</script>
+</body>
+</html>

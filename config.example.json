@@ -1,0 +1,19 @@
+{
+  "listen": ":8080",
+  "streams": [
+    {
+      "id": "vto1",
+      "name": "Front Door",
+      "host": "192.168.88.200",
+      "user": "admin",
+      "pass": "REPLACE_ME"
+    },
+    {
+      "id": "vto2",
+      "name": "Gate",
+      "host": "192.168.88.202",
+      "user": "admin",
+      "pass": "REPLACE_ME"
+    }
+  ]
+}

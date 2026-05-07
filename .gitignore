@@ -1,0 +1,15 @@
+# Binaries
+/camonitor
+/camonitor-*
+
+# Local config — config.json contains plaintext camera credentials
+/config.json
+/config.*.json
+!config.example.json
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
