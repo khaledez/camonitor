@@ -51,6 +51,12 @@
     font-variant-numeric: tabular-nums;
   }
   .cell .quality-btn.hd { background: #2d4d6a; border-color: #4a6a8d; }
+  .cell .mute-btn {
+    position: absolute; top: 6px; left: calc(6px + 60px);
+    background: rgba(40,40,44,.85); border: 1px solid #4a4a52;
+    min-width: 36px;
+  }
+  .cell .mute-btn.live { background: #2d6a4d; border-color: #4a8d6a; }
   .cell .placeholder {
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; color: #555; font-size: 13px;
@@ -246,7 +252,7 @@ async function connectInner() {
 
   // Build cells in the same order the server lists streams. ontrack events
   // fire in transceiver/m-line order, which matches.
-  const cells = [];
+  const cells = {}; // keyed by the server's WebRTC stream ID ("vto-<id>")
   for (const s of offer.streams) {
     const cell = document.createElement('div');
     cell.className = 'cell';
@@ -283,6 +289,20 @@ async function connectInner() {
     });
     cell.appendChild(qualityBtn);
 
+    const muteBtn = document.createElement('button');
+    muteBtn.className = 'mute-btn';
+    muteBtn.textContent = 'OFF';
+    muteBtn.title = 'Listen to ' + (s.name || s.id);
+    muteBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectCell(cell);
+      const live = video.muted; // if currently muted, we're going live
+      video.muted = !live;
+      muteBtn.classList.toggle('live', live);
+      muteBtn.textContent = live ? 'ON' : 'OFF';
+    });
+    cell.appendChild(muteBtn);
+
     const doorBtn = document.createElement('button');
     doorBtn.className = 'door-btn';
     doorBtn.textContent = 'open door';
@@ -300,23 +320,36 @@ async function connectInner() {
     cell.appendChild(stalledFlag);
 
     grid.appendChild(cell);
-    cells.push({ cell, video, placeholder });
+    // Index by the WebRTC stream ID the server uses ("vto-<id>") so
+    // ontrack events can find the right cell — needed now that each
+    // stream carries both a video and an audio track.
+    cells['vto-' + s.id] = { cell, video, placeholder };
   }
   if (grid.firstChild) selectCell(grid.firstChild);
 
   pc = new RTCPeerConnection();
 
-  let trackIndex = 0;
   pc.ontrack = (e) => {
-    const slot = cells[trackIndex++];
+    const streamID = e.streams[0] && e.streams[0].id;
+    const slot = cells[streamID];
     if (!slot) return;
-    slot.video.srcObject = e.streams[0] || new MediaStream([e.track]);
-    slot.placeholder.remove();
-    // mute/unmute on a WebRTC video track fire when packets stop or
-    // resume — drives both the "stalled" badge during outages and the
-    // resume signal that ends a quality-switch spinner.
-    e.track.addEventListener('mute', () => slot.cell.classList.add('stalled'));
-    e.track.addEventListener('unmute', () => slot.cell.classList.remove('stalled'));
+
+    // First track of the stream creates the MediaStream; subsequent
+    // tracks (e.g. audio after video) get added to the same stream so
+    // the <video> element plays both. The video element stays
+    // video.muted=true until the user clicks ON.
+    if (!slot.video.srcObject) {
+      slot.video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      slot.placeholder.remove();
+    }
+    // mute/unmute on a WebRTC track fire when packets stop or resume —
+    // drives both the "stalled" badge during outages and the resume
+    // signal that ends a quality-switch spinner. Watching only the
+    // video track here is enough — audio gaps shouldn't shroud the cell.
+    if (e.track.kind === 'video') {
+      e.track.addEventListener('mute', () => slot.cell.classList.add('stalled'));
+      e.track.addEventListener('unmute', () => slot.cell.classList.remove('stalled'));
+    }
   };
 
   pc.onconnectionstatechange = () => {

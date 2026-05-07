@@ -43,10 +43,13 @@ const (
 	minBackoff      = 1 * time.Second
 	maxBackoff      = 30 * time.Second
 
-	// TCP-interleaved channel numbers we ask for in SETUP. Channel 0 carries
-	// RTP packets we forward; channel 1 carries RTCP which we discard.
-	rtpChannel  byte = 0
-	rtcpChannel byte = 1
+	// TCP-interleaved channel numbers we request in SETUP. Each media gets
+	// a pair (RTP, RTCP). Two SETUPs use channels 0/1 for video and 2/3
+	// for audio.
+	chanVideoRTP  byte = 0
+	chanVideoRTCP byte = 1
+	chanAudioRTP  byte = 2
+	chanAudioRTCP byte = 3
 )
 
 // trackWriter is the slice of *webrtc.TrackLocalStaticRTP we depend on. The
@@ -56,18 +59,27 @@ type trackWriter interface {
 	WriteRTP(*rtp.Packet) error
 }
 
+// streamTargets bundles the per-stream sinks runRTSPReader writes into. The
+// audioWriter is nil if the stream's SDP advertised no audio media (or we
+// don't know how to handle it). A non-nil audioWriter may include codec
+// transcoding (e.g. L16/16000 → PCMA/8000) — see transcode.go.
+type streamTargets struct {
+	videoTrack  trackWriter
+	audioWriter func(*rtp.Packet) error
+}
+
 // runRTSPReader keeps a stream connected with bounded exponential backoff
-// and forwards every received H.264 RTP packet into the supplied track.
-// The subtype selects the Dahua stream variant (0 = main / HD, 1 = sub /
-// SD). It exits only when ctx is cancelled.
-func runRTSPReader(ctx context.Context, s StreamConfig, track trackWriter, subtype int) {
+// and routes RTP packets into the supplied targets. The subtype selects the
+// Dahua stream variant (0 = main / HD, 1 = sub / SD). It exits only when
+// ctx is cancelled.
+func runRTSPReader(ctx context.Context, s StreamConfig, targets streamTargets, subtype int) {
 	backoff := minBackoff
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		err := streamOnce(ctx, s, subtype, track)
+		err := streamOnce(ctx, s, subtype, targets)
 		if ctx.Err() != nil {
 			return
 		}
@@ -85,7 +97,7 @@ func runRTSPReader(ctx context.Context, s StreamConfig, track trackWriter, subty
 	}
 }
 
-func streamOnce(ctx context.Context, s StreamConfig, subtype int, track trackWriter) error {
+func streamOnce(ctx context.Context, s StreamConfig, subtype int, targets streamTargets) error {
 	u, err := url.Parse(s.RTSPURLForSubtype(subtype))
 	if err != nil {
 		return fmt.Errorf("parse url: %w", err)
@@ -123,8 +135,11 @@ func streamOnce(ctx context.Context, s StreamConfig, subtype int, track trackWri
 		return err
 	}
 
-	log.Printf("[%s] connected to %s; forwarding H.264", s.ID, redact(u))
-	return rc.readPackets(track)
+	hasAudio := rc.audioControlURL != ""
+	log.Printf("[%s] connected to %s; H.264 video%s",
+		s.ID, redact(u),
+		map[bool]string{true: " + audio", false: ""}[hasAudio])
+	return rc.readPackets(targets)
 }
 
 // redact returns the URL string without any embedded user:password.
@@ -149,6 +164,11 @@ type rtspConn struct {
 	cseq    int
 	session string // returned in SETUP, sent on subsequent requests
 
+	// audioControlURL records whether the SDP advertised an audio media
+	// we successfully SETUP'd. Used by readPackets to decide whether to
+	// invoke targets.audioWriter on chanAudioRTP frames.
+	audioControlURL string
+
 	// readBuf is reused across every interleaved frame on this connection.
 	// 64 KiB matches the maximum length expressible in the 16-bit length
 	// field; in practice frames are MTU-bounded and far smaller. Per-conn
@@ -170,8 +190,10 @@ func newRTSPConn(conn net.Conn, source *url.URL) *rtspConn {
 	}
 }
 
-// handshake walks OPTIONS → DESCRIBE → SETUP → PLAY. After it returns the
-// connection is ready to deliver interleaved RTP frames.
+// handshake walks OPTIONS → DESCRIBE → (SETUP video, SETUP audio?) → PLAY.
+// After it returns the connection is ready to deliver interleaved RTP frames
+// for any media that was successfully set up. Audio is best-effort: we only
+// SETUP it if the SDP advertised one of the codecs we know how to handle.
 func (rc *rtspConn) handshake() error {
 	if _, err := rc.do("OPTIONS", rc.requestURI.String(), nil); err != nil {
 		return fmt.Errorf("OPTIONS: %w", err)
@@ -184,10 +206,6 @@ func (rc *rtspConn) handshake() error {
 		return fmt.Errorf("DESCRIBE: %w", err)
 	}
 
-	// One-shot SDP dump for v0.3.6 — used to discover what audio media the
-	// camera advertises before we write the real audio path.
-	log.Printf("=== SDP from %s ===\n%s=== end SDP ===", redact(rc.requestURI), string(desc.body))
-
 	// PLAY targets the session URI, which is Content-Base when present and
 	// the original request URI otherwise (RFC 2326 C.1.1).
 	sessionURI := rc.requestURI.String()
@@ -195,20 +213,32 @@ func (rc *rtspConn) handshake() error {
 		sessionURI = cb
 	}
 
-	controlURL, err := findH264ControlURL(string(desc.body), sessionURI)
+	video, audio, err := findMedia(string(desc.body), sessionURI)
 	if err != nil {
 		return fmt.Errorf("SDP: %w", err)
 	}
 
-	setup, err := rc.do("SETUP", controlURL, map[string]string{
-		"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", rtpChannel, rtcpChannel),
+	setup, err := rc.do("SETUP", video.controlURL, map[string]string{
+		"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", chanVideoRTP, chanVideoRTCP),
 	})
 	if err != nil {
-		return fmt.Errorf("SETUP: %w", err)
+		return fmt.Errorf("SETUP video: %w", err)
 	}
 	rc.session = sessionIDOnly(setup.header("Session"))
 	if rc.session == "" {
 		return errors.New("SETUP: missing Session header")
+	}
+
+	if audio != nil {
+		if _, err := rc.do("SETUP", audio.controlURL, map[string]string{
+			"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", chanAudioRTP, chanAudioRTCP),
+		}); err != nil {
+			// Don't fail the whole stream on audio SETUP errors — log and
+			// continue with video-only.
+			log.Printf("SETUP audio (%s): %v — continuing video-only", audio.codec, err)
+		} else {
+			rc.audioControlURL = audio.controlURL
+		}
 	}
 
 	if _, err := rc.do("PLAY", sessionURI, map[string]string{
@@ -219,10 +249,11 @@ func (rc *rtspConn) handshake() error {
 	return nil
 }
 
-// readPackets forwards every RTP packet received on rtpChannel into track,
-// blocking until the connection breaks. RTCP and any other interleaved
-// channel numbers are silently discarded.
-func (rc *rtspConn) readPackets(track trackWriter) error {
+// readPackets routes incoming RTP frames to the right sink. Channel 0 is
+// the video RTP stream → targets.videoTrack. Channel 2 is audio RTP →
+// targets.audioWriter (which may be a transcoder). RTCP frames (channels
+// 1 and 3) are silently discarded.
+func (rc *rtspConn) readPackets(targets streamTargets) error {
 	pkt := &rtp.Packet{}
 	for {
 		if err := rc.conn.SetReadDeadline(time.Now().Add(rtpReadIdle)); err != nil {
@@ -232,15 +263,26 @@ func (rc *rtspConn) readPackets(track trackWriter) error {
 		if err != nil {
 			return err
 		}
-		if ch != rtpChannel {
-			continue
+
+		var write func(*rtp.Packet) error
+		switch ch {
+		case chanVideoRTP:
+			write = targets.videoTrack.WriteRTP
+		case chanAudioRTP:
+			if rc.audioControlURL == "" || targets.audioWriter == nil {
+				continue
+			}
+			write = targets.audioWriter
+		default:
+			continue // RTCP or unexpected channel
 		}
+
 		if err := pkt.Unmarshal(payload); err != nil {
 			log.Printf("rtp unmarshal: %v", err)
 			continue
 		}
-		if err := track.WriteRTP(pkt); err != nil {
-			return fmt.Errorf("write track: %w", err)
+		if err := write(pkt); err != nil {
+			return fmt.Errorf("forward rtp ch=%d: %w", ch, err)
 		}
 	}
 }
@@ -410,25 +452,32 @@ func sessionIDOnly(value string) string {
 
 // ---- SDP --------------------------------------------------------------
 
-// findH264ControlURL parses the SDP body, locates the first H.264 video
-// media, and resolves its control URL relative to baseURI. The control URL
-// is what we send to SETUP.
+// rtspMedia identifies one media entry in an RTSP SDP that we'll forward.
+type rtspMedia struct {
+	kind       string // "video" or "audio"
+	codec      string // uppercased codec name from a=rtpmap (e.g. H264, L16, PCMA)
+	controlURL string // absolute URL for SETUP, resolved per RFC 2326 C.1.1
+}
+
+// findMedia parses the SDP and picks out the H.264 video media (required)
+// and an optional audio media we know how to handle. Audio is best-effort —
+// missing audio is not an error.
 //
 // SDP control resolution per RFC 2326 C.1.1:
 //   - "*" means "use the base URL"
 //   - an absolute URL is used verbatim
-//   - a relative value is appended to the session base, treating the base as
-//     if it ended with '/' (this differs from generic RFC 3986 resolution,
-//     which would replace the last path segment).
-func findH264ControlURL(sdp, baseURI string) (string, error) {
-	type media struct {
+//   - a relative value is appended to the session base, treating the base
+//     as if it ended with '/' (this differs from generic RFC 3986
+//     resolution, which would replace the last path segment).
+func findMedia(sdp, baseURI string) (video rtspMedia, audio *rtspMedia, err error) {
+	type rawMedia struct {
 		kind    string
 		pts     []string
 		codecs  map[string]string // payload type → codec name (uppercased)
 		control string
 	}
-	var medias []*media
-	var current *media
+	var medias []*rawMedia
+	var current *rawMedia
 	inMedia := false
 
 	for raw := range strings.SplitSeq(sdp, "\n") {
@@ -439,7 +488,7 @@ func findH264ControlURL(sdp, baseURI string) (string, error) {
 				medias = append(medias, current)
 			}
 			fields := strings.Fields(strings.TrimPrefix(line, "m="))
-			current = &media{codecs: map[string]string{}}
+			current = &rawMedia{codecs: map[string]string{}}
 			if len(fields) >= 1 {
 				current.kind = fields[0]
 			}
@@ -462,26 +511,56 @@ func findH264ControlURL(sdp, baseURI string) (string, error) {
 		medias = append(medias, current)
 	}
 
-	for _, m := range medias {
-		if m.kind != "video" {
-			continue
-		}
-		isH264 := false
+	pick := func(m *rawMedia, want ...string) string {
 		for _, pt := range m.pts {
-			if m.codecs[pt] == "H264" {
-				isH264 = true
-				break
+			c := m.codecs[pt]
+			for _, w := range want {
+				if c == w {
+					return c
+				}
 			}
 		}
-		if !isH264 {
-			continue
-		}
-		if m.control == "" {
-			return "", errors.New("H.264 media has no a=control attribute")
-		}
-		return resolveControl(baseURI, m.control), nil
+		return ""
 	}
-	return "", errors.New("no H.264 media found in SDP")
+
+	foundVideo := false
+	for _, m := range medias {
+		switch m.kind {
+		case "video":
+			if foundVideo {
+				continue
+			}
+			if pick(m, "H264") == "" {
+				continue
+			}
+			if m.control == "" {
+				return video, nil, errors.New("H.264 media has no a=control attribute")
+			}
+			video = rtspMedia{
+				kind:       "video",
+				codec:      "H264",
+				controlURL: resolveControl(baseURI, m.control),
+			}
+			foundVideo = true
+		case "audio":
+			if audio != nil {
+				continue
+			}
+			codec := pick(m, "L16", "PCMA", "PCMU")
+			if codec == "" || m.control == "" {
+				continue
+			}
+			audio = &rtspMedia{
+				kind:       "audio",
+				codec:      codec,
+				controlURL: resolveControl(baseURI, m.control),
+			}
+		}
+	}
+	if !foundVideo {
+		return video, nil, errors.New("no H.264 media found in SDP")
+	}
+	return video, audio, nil
 }
 
 func resolveControl(base, control string) string {

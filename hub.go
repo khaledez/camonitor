@@ -31,7 +31,8 @@ type Hub struct {
 	api         *webrtc.API
 	streams     []StreamConfig
 	streamsByID map[string]StreamConfig
-	tracks      map[string]*webrtc.TrackLocalStaticRTP
+	videoTracks map[string]*webrtc.TrackLocalStaticRTP
+	audioTracks map[string]*webrtc.TrackLocalStaticRTP
 	runners     map[string]*streamRunner
 
 	mu       sync.Mutex
@@ -85,20 +86,32 @@ func NewHub(ctx context.Context, streams []StreamConfig, api *webrtc.API) (*Hub,
 		api:         api,
 		streams:     streams,
 		streamsByID: make(map[string]StreamConfig, len(streams)),
-		tracks:      make(map[string]*webrtc.TrackLocalStaticRTP, len(streams)),
+		videoTracks: make(map[string]*webrtc.TrackLocalStaticRTP, len(streams)),
+		audioTracks: make(map[string]*webrtc.TrackLocalStaticRTP, len(streams)),
 		runners:     make(map[string]*streamRunner, len(streams)),
 		sessions:    make(map[string]*webrtc.PeerConnection),
 	}
 	for _, s := range streams {
-		t, err := webrtc.NewTrackLocalStaticRTP(
+		// Same WebRTC stream ID for video + audio so the browser bundles
+		// them into a single MediaStream and the <video> element plays
+		// both. The trackID part keeps the two tracks distinguishable.
+		streamID := "vto-" + s.ID
+		video, err := webrtc.NewTrackLocalStaticRTP(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
-			"video-"+s.ID,
-			"vto-"+s.ID,
+			"video-"+s.ID, streamID,
 		)
 		if err != nil {
 			return nil, err
 		}
-		h.tracks[s.ID] = t
+		audio, err := webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMA, ClockRate: 8000, Channels: 1},
+			"audio-"+s.ID, streamID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		h.videoTracks[s.ID] = video
+		h.audioTracks[s.ID] = audio
 		h.streamsByID[s.ID] = s
 		h.runners[s.ID] = &streamRunner{}
 
@@ -132,11 +145,14 @@ func (h *Hub) startReader(streamID, quality string) {
 	runner.quality.Store(&q)
 
 	s := h.streamsByID[streamID]
-	track := h.tracks[streamID]
+	targets := streamTargets{
+		videoTrack:  h.videoTracks[streamID],
+		audioWriter: l16ToPCMAForwarder(h.audioTracks[streamID]),
+	}
 	subtype := subtypeFor(quality)
 	go func() {
 		defer close(done)
-		runRTSPReader(ctx, s, track, subtype)
+		runRTSPReader(ctx, s, targets, subtype)
 	}()
 }
 
@@ -206,16 +222,18 @@ func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, s := range h.streams {
-		sender, err := pc.AddTrack(h.tracks[s.ID])
-		if err != nil {
-			pc.Close()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		for _, t := range []*webrtc.TrackLocalStaticRTP{h.videoTracks[s.ID], h.audioTracks[s.ID]} {
+			sender, err := pc.AddTrack(t)
+			if err != nil {
+				pc.Close()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// Drain RTCP from each sender so pion's congestion bookkeeping
+			// keeps moving. We ignore the contents — there's no transcoding
+			// to react to.
+			go drainRTCP(sender)
 		}
-		// Drain RTCP from each sender so pion's congestion bookkeeping
-		// keeps moving. We ignore the contents — there's no transcoding
-		// to react to.
-		go drainRTCP(sender)
 	}
 
 	offer, err := pc.CreateOffer(nil)
