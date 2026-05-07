@@ -7,6 +7,9 @@
 /config.*.json
 !config.example.json
 
+# Kubernetes secret with real camera credentials, never committed
+/deploy/k8s/secret.yaml
+
 # OS / editor cruft
 .DS_Store
 *.swp
