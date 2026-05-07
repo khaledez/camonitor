@@ -2,6 +2,13 @@
 // single web page that plays them all and exposes a per-stream door-open
 // button. Configuration is read from a JSON file whose path is passed via
 // the -config flag.
+//
+// When -tailscale <hostname> is supplied, camonitor registers itself on
+// the user's tailnet under that hostname. HTTPS and pion's ICE UDP mux
+// bind on the tsnet interface, so WebRTC media flows directly across the
+// tailnet — no Tailscale operator / Ingress / per-port TCP-relay needed.
+// The TS_AUTHKEY env var is required for the first auth; subsequent
+// restarts reuse persisted state from $TS_STATE_DIR (default ./tsnet).
 package main
 
 import (
@@ -13,12 +20,17 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pion/webrtc/v4"
+	"tailscale.com/tsnet"
 )
 
 //go:embed web
@@ -113,10 +125,66 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// startTailscale brings up a tsnet node and returns the HTTPS listener and
+// the UDP packet conn pion should use for ICE. Both are bound on the
+// tailnet interface so browser-side ICE candidates are reachable from any
+// other tailnet device.
+//
+// hostname becomes the tailnet machine name (and the host part of the
+// HTTPS URL). TS_AUTHKEY is consulted on first registration; subsequent
+// restarts reuse the persisted identity in TS_STATE_DIR.
+func startTailscale(hostname string) (*tsnet.Server, net.Listener, net.PacketConn, error) {
+	authKey := os.Getenv("TS_AUTHKEY")
+	stateDir := os.Getenv("TS_STATE_DIR")
+	if stateDir == "" {
+		stateDir = "tsnet"
+	}
+
+	ts := &tsnet.Server{
+		Hostname: hostname,
+		AuthKey:  authKey, // empty is fine after first run; tsnet uses persisted identity
+		Dir:      stateDir,
+	}
+	if err := ts.Start(); err != nil {
+		return nil, nil, nil, fmt.Errorf("tsnet start: %w", err)
+	}
+
+	udp, err := ts.ListenPacket("udp", ":0")
+	if err != nil {
+		ts.Close()
+		return nil, nil, nil, fmt.Errorf("tsnet udp: %w", err)
+	}
+
+	tls, err := ts.ListenTLS("tcp", ":443")
+	if err != nil {
+		udp.Close()
+		ts.Close()
+		return nil, nil, nil, fmt.Errorf("tsnet listenTLS: %w", err)
+	}
+
+	return ts, tls, udp, nil
+}
+
+// newWebRTCAPI returns a *webrtc.API. If iceUDP is non-nil, all
+// PeerConnections share it as their ICE-UDP transport — pion advertises
+// the conn's local address as a host candidate, demuxes per-peer by ICE
+// ufrag, and never needs the cluster's own ephemeral UDP ports.
+func newWebRTCAPI(iceUDP net.PacketConn) *webrtc.API {
+	if iceUDP == nil {
+		return webrtc.NewAPI()
+	}
+	se := webrtc.SettingEngine{}
+	se.SetICEUDPMux(webrtc.NewICEUDPMux(nil, iceUDP))
+	return webrtc.NewAPI(webrtc.WithSettingEngine(se))
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	configPath := flag.String("config", "config.json", "path to JSON config file")
+	tsHostname := flag.String("tailscale", "",
+		"if set, register on the tailnet with this hostname and serve HTTPS / "+
+			"WebRTC media over the tailnet. Requires TS_AUTHKEY env on first run.")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -127,9 +195,21 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The hub starts and supervises one RTSP reader per stream — passing
-	// it ctx here lets a SIGTERM cascade through to every reader.
-	hub, err := NewHub(ctx, cfg.Streams)
+	var (
+		ts         *tsnet.Server
+		tsListener net.Listener
+		iceUDP     net.PacketConn
+	)
+	if *tsHostname != "" {
+		ts, tsListener, iceUDP, err = startTailscale(*tsHostname)
+		if err != nil {
+			log.Fatalf("tailscale: %v", err)
+		}
+		defer ts.Close()
+		log.Printf("tsnet: hostname=%s ICE UDP=%s", *tsHostname, iceUDP.LocalAddr())
+	}
+
+	hub, err := NewHub(ctx, cfg.Streams, newWebRTCAPI(iceUDP))
 	if err != nil {
 		log.Fatalf("create hub: %v", err)
 	}
@@ -148,20 +228,41 @@ func main() {
 	mux.HandleFunc("/stream/quality", hub.HandleSetQuality)
 	mux.HandleFunc("/door/open", doors.HandleOpen)
 
-	srv := &http.Server{
+	// The plain HTTP listener stays even when tailnet is enabled — it
+	// serves liveness/readiness probes from kubelet and any in-cluster
+	// access. Tailnet clients use the HTTPS listener below.
+	plainSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	tsSrv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	serverErr := make(chan error, 1)
+	serverErr := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
 	go func() {
-		log.Printf("camonitor listening on %s with %d stream(s)", cfg.Listen, len(cfg.Streams))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
+		defer wg.Done()
+		log.Printf("camonitor HTTP listening on %s with %d stream(s)", cfg.Listen, len(cfg.Streams))
+		if err := plainSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- fmt.Errorf("plain http: %w", err)
 		}
-		close(serverErr)
 	}()
+
+	if tsListener != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("camonitor HTTPS listening on %s.<tailnet>.ts.net", *tsHostname)
+			if err := tsSrv.Serve(tsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverErr <- fmt.Errorf("tsnet http: %w", err)
+			}
+		}()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -170,11 +271,13 @@ func main() {
 	case <-sig:
 		log.Println("shutting down")
 	case err := <-serverErr:
-		log.Fatalf("http server: %v", err)
+		log.Fatalf("%v", err)
 	}
 
 	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShut()
-	_ = srv.Shutdown(shutCtx)
+	_ = plainSrv.Shutdown(shutCtx)
+	_ = tsSrv.Shutdown(shutCtx)
 	cancel()
+	wg.Wait()
 }

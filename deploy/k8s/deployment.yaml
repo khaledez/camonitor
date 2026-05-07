@@ -6,6 +6,11 @@ metadata:
   labels:
     app: monitor
 spec:
+  # tsnet stores per-node WireGuard state in TS_STATE_DIR; only one pod
+  # may use a given state dir at a time. Recreate (don't roll) so the
+  # new pod always has the volume to itself.
+  strategy:
+    type: Recreate
   replicas: 1
   selector:
     matchLabels:
@@ -16,8 +21,6 @@ spec:
         app: monitor
     spec:
       # Satisfies the cluster's "restricted" PodSecurity profile.
-      # camonitor is a static binary, has no filesystem writes, and only
-      # binds an unprivileged port — none of these caps/UIDs are needed.
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -27,8 +30,23 @@ spec:
           type: RuntimeDefault
       containers:
         - name: monitor
-          image: ghcr.io/khaledez/camonitor:0.2.0
-          args: ["-config", "/etc/camonitor/config.json"]
+          image: ghcr.io/khaledez/camonitor:0.3.0
+          args:
+            - -config
+            - /etc/camonitor/config.json
+            - -tailscale
+            - monitor
+          env:
+            # Auth key consumed on first start; subsequent restarts use
+            # the persisted identity in /var/lib/tsnet.
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: monitor-tsnet
+                  key: authkey
+                  optional: true
+            - name: TS_STATE_DIR
+              value: /var/lib/tsnet
           ports:
             - name: http
               containerPort: 8080
@@ -41,6 +59,8 @@ spec:
             - name: config
               mountPath: /etc/camonitor
               readOnly: true
+            - name: tsnet-state
+              mountPath: /var/lib/tsnet
           readinessProbe:
             httpGet:
               path: /
@@ -55,7 +75,7 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 96Mi
             limits:
               memory: 256Mi
       volumes:
@@ -65,3 +85,18 @@ spec:
             items:
               - key: config.json
                 path: config.json
+        - name: tsnet-state
+          persistentVolumeClaim:
+            claimName: monitor-tsnet
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: monitor-tsnet
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 64Mi

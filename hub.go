@@ -28,6 +28,7 @@ import (
 // connection stays at 1× regardless of viewer count.
 type Hub struct {
 	parentCtx   context.Context
+	api         *webrtc.API
 	streams     []StreamConfig
 	streamsByID map[string]StreamConfig
 	tracks      map[string]*webrtc.TrackLocalStaticRTP
@@ -75,10 +76,13 @@ func subtypeFor(quality string) int {
 const sessionAnswerTimeout = 30 * time.Second
 
 // NewHub creates the hub and immediately starts an HD-quality RTSP reader
-// for every configured stream. Readers stop when ctx is cancelled.
-func NewHub(ctx context.Context, streams []StreamConfig) (*Hub, error) {
+// for every configured stream. Readers stop when ctx is cancelled. The
+// api parameter carries any SettingEngine config (e.g. ICE UDP mux bound
+// to a tsnet packet conn) so all PeerConnections share that media path.
+func NewHub(ctx context.Context, streams []StreamConfig, api *webrtc.API) (*Hub, error) {
 	h := &Hub{
 		parentCtx:   ctx,
+		api:         api,
 		streams:     streams,
 		streamsByID: make(map[string]StreamConfig, len(streams)),
 		tracks:      make(map[string]*webrtc.TrackLocalStaticRTP, len(streams)),
@@ -195,7 +199,7 @@ func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := h.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
