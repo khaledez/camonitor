@@ -35,8 +35,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ---- runtime stage -------------------------------------------------------
 FROM scratch
 
-# Camonitor only talks to the LAN (RTSP/HTTP plain), serves HTTP itself, and
-# writes logs to stderr. Nothing else needs to be in the image.
+# CA bundle so tsnet's ACME client can verify api.letsencrypt.org when
+# requesting Tailscale's auto-provisioned HTTPS cert. The Debian-based
+# build image ships this file; copying it is cheaper than switching to
+# a distroless base.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
 COPY --from=build /out/camonitor /camonitor
 
 EXPOSE 8080
