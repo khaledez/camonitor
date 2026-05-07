@@ -149,9 +149,17 @@ func startTailscale(hostname string) (*tsnet.Server, net.Listener, net.PacketCon
 		return nil, nil, nil, fmt.Errorf("tsnet start: %w", err)
 	}
 
-	// tsnet rejects ":0" (host part required). 0.0.0.0:0 binds on the
-	// tsnet virtual interface with an OS-assigned port.
-	udp, err := ts.ListenPacket("udp", "0.0.0.0:0")
+	// Start() returns before authentication completes. Wait for the node
+	// to be Running so its tailnet IP exists — without this, listeners
+	// bound below will fail because the interface has no address yet.
+	upCtx, upCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer upCancel()
+	if _, err := ts.Up(upCtx); err != nil {
+		ts.Close()
+		return nil, nil, nil, fmt.Errorf("tsnet up: %w", err)
+	}
+
+	udp, err := ts.ListenPacket("udp", ":0")
 	if err != nil {
 		ts.Close()
 		return nil, nil, nil, fmt.Errorf("tsnet udp: %w", err)
