@@ -159,7 +159,15 @@ func startTailscale(hostname string) (*tsnet.Server, net.Listener, net.PacketCon
 		return nil, nil, nil, fmt.Errorf("tsnet up: %w", err)
 	}
 
-	udp, err := ts.ListenPacket("udp", "0.0.0.0:0")
+	// tsnet's ListenPacket validates the address as a non-zero, non-
+	// unspecified IP — so ":0" and "0.0.0.0:0" both fail. Bind on the
+	// IPv4 address the control plane assigned to this node.
+	ip4, _ := ts.TailscaleIPs()
+	if !ip4.IsValid() {
+		ts.Close()
+		return nil, nil, nil, fmt.Errorf("tsnet has no IPv4 address after Up")
+	}
+	udp, err := ts.ListenPacket("udp", net.JoinHostPort(ip4.String(), "0"))
 	if err != nil {
 		ts.Close()
 		return nil, nil, nil, fmt.Errorf("tsnet udp: %w", err)
