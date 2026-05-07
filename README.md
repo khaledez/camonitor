@@ -14,7 +14,9 @@ rolled in `rtsp.go` (RTSP-over-TCP, HTTP-Digest, single H.264 media).
 cp config.example.json /etc/camonitor/config.json
 $EDITOR /etc/camonitor/config.json
 
-# 2. Pull and run.
+# 2. Pull and run. Pin to a specific version (e.g. :0.1.0) for production
+#    or use :latest while you're trying it out. Note: image tags drop the
+#    leading "v" — git tag v1.2.3 → image tag 1.2.3.
 docker run --rm \
   --name camonitor \
   -p 8080:8080 \
