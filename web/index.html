@@ -55,6 +55,31 @@
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; color: #555; font-size: 13px;
   }
+  /* Busy: shown during a quality switch until frames resume. */
+  .cell.busy::before {
+    content: ''; position: absolute; inset: 0;
+    background: rgba(0,0,0,.4); z-index: 1; pointer-events: none;
+  }
+  .cell.busy::after {
+    content: ''; position: absolute;
+    top: calc(50% - 16px); left: calc(50% - 16px);
+    width: 32px; height: 32px;
+    border: 3px solid rgba(255,255,255,.2);
+    border-top-color: rgba(255,255,255,.9);
+    border-radius: 50%;
+    animation: cam-spin 0.8s linear infinite;
+    z-index: 2; pointer-events: none;
+  }
+  @keyframes cam-spin { to { transform: rotate(360deg); } }
+  /* Stalled: shown whenever the WebRTC track is muted (no packets). */
+  .cell .stalled-flag {
+    position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.7); color: #f0c060;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; pointer-events: none;
+    display: none;
+  }
+  .cell.stalled .stalled-flag { display: block; }
 </style>
 </head>
 <body>
@@ -85,28 +110,65 @@ function selectCell(cell) {
   cell.classList.add('selected');
 }
 
-async function setQuality(streamId, quality, button) {
+// waitForResume resolves when the supplied MediaStreamTrack receives data
+// again (track 'unmute' event), or when timeoutMs has elapsed. The
+// timeout is reached on the happy path too whenever the gap between old
+// and new RTSP sources is too short for the browser to flip the track's
+// `muted` flag — in that case we simply remove the busy state on time.
+function waitForResume(track, timeoutMs) {
+  return new Promise(resolve => {
+    if (!track) {
+      setTimeout(resolve, Math.min(timeoutMs, 3000));
+      return;
+    }
+    const onUnmute = () => {
+      track.removeEventListener('unmute', onUnmute);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      track.removeEventListener('unmute', onUnmute);
+      resolve();
+    }, timeoutMs);
+    track.addEventListener('unmute', onUnmute);
+  });
+}
+
+async function setQuality(streamId, newQuality, button) {
+  const cell = button.closest('.cell');
+  const video = cell.querySelector('video');
   const previousQuality = button.dataset.quality;
+  if (newQuality === previousQuality) return;
+
   button.disabled = true;
-  button.textContent = quality.toUpperCase() + '…';
+  button.textContent = newQuality.toUpperCase() + '…';
+  cell.classList.add('busy');
+
+  // Set up the resume watcher BEFORE the POST so we don't miss a fast
+  // unmute event that fires between the server-side switch and our await.
+  const track = video.srcObject ? video.srcObject.getVideoTracks()[0] : null;
+  const resumed = waitForResume(track, 6000);
+
   try {
     const res = await fetch(
-      '/stream/quality?id=' + encodeURIComponent(streamId) + '&quality=' + quality,
+      '/stream/quality?id=' + encodeURIComponent(streamId) + '&quality=' + newQuality,
       { method: 'POST' },
     );
     if (!res.ok) {
-      const msg = await res.text();
+      const msg = (await res.text()).trim();
       throw new Error(msg || ('http ' + res.status));
     }
-    button.dataset.quality = quality;
-    button.classList.toggle('hd', quality === 'hd');
-    button.textContent = quality.toUpperCase();
+    button.dataset.quality = newQuality;
+    button.classList.toggle('hd', newQuality === 'hd');
+    await resumed;
+    button.textContent = newQuality.toUpperCase();
   } catch (err) {
     console.error('quality switch failed:', err);
     button.textContent = previousQuality.toUpperCase();
     setStatus('quality switch failed: ' + err.message, 'err');
   } finally {
     button.disabled = false;
+    cell.classList.remove('busy');
   }
 }
 
@@ -232,8 +294,13 @@ async function connectInner() {
     });
     cell.appendChild(doorBtn);
 
+    const stalledFlag = document.createElement('div');
+    stalledFlag.className = 'stalled-flag';
+    stalledFlag.textContent = 'no frames';
+    cell.appendChild(stalledFlag);
+
     grid.appendChild(cell);
-    cells.push({ video, placeholder });
+    cells.push({ cell, video, placeholder });
   }
   if (grid.firstChild) selectCell(grid.firstChild);
 
@@ -245,6 +312,11 @@ async function connectInner() {
     if (!slot) return;
     slot.video.srcObject = e.streams[0] || new MediaStream([e.track]);
     slot.placeholder.remove();
+    // mute/unmute on a WebRTC video track fire when packets stop or
+    // resume — drives both the "stalled" badge during outages and the
+    // resume signal that ends a quality-switch spinner.
+    e.track.addEventListener('mute', () => slot.cell.classList.add('stalled'));
+    e.track.addEventListener('unmute', () => slot.cell.classList.remove('stalled'));
   };
 
   pc.onconnectionstatechange = () => {
