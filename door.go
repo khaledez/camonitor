@@ -43,8 +43,7 @@ func NewDoorClient(streams []StreamConfig) *DoorClient {
 
 // HandleOpen serves POST /door/open?id=<streamID>.
 func (d *DoorClient) HandleOpen(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requirePost(w, r) {
 		return
 	}
 	id := r.URL.Query().Get("id")
@@ -60,11 +59,11 @@ func (d *DoorClient) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		log.Printf("door open [%s]: %v", id, err)
 		switch {
 		case errors.Is(err, errUnknownStream):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "unknown stream", http.StatusNotFound)
 		case errors.Is(err, context.DeadlineExceeded):
 			http.Error(w, "camera did not respond in time", http.StatusGatewayTimeout)
 		default:
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, "door open failed", http.StatusBadGateway)
 		}
 		return
 	}
@@ -78,6 +77,10 @@ var errUnknownStream = errors.New("unknown stream")
 // The first request is sent unauthenticated to obtain a 401 challenge with
 // the realm/nonce; the second request carries the computed Authorization
 // header.
+//
+// Camera response bodies are logged on the server and never propagated up
+// — they can contain HTML/error markup that we don't want flowing back to
+// the browser via http.Error.
 func (d *DoorClient) Open(ctx context.Context, streamID string) error {
 	s, ok := d.streams[streamID]
 	if !ok {
@@ -85,45 +88,40 @@ func (d *DoorClient) Open(ctx context.Context, streamID string) error {
 	}
 
 	target := s.DoorOpenURL()
-	parsed, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("parse door url: %w", err)
-	}
-	requestTarget := parsed.RequestURI() // path + query — what HTTP digest signs
 
 	resp, err := d.send(ctx, target, "")
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
-	case http.StatusOK:
+	if resp.StatusCode == http.StatusOK {
 		drainAndClose(resp.Body)
 		return nil
-	case http.StatusUnauthorized:
-		// expected — fall through to the challenge-response branch
-	default:
-		body := readShortBody(resp.Body)
-		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		logBody(streamID, resp)
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	challengeHdr := resp.Header.Get("WWW-Authenticate")
+	chal, err := parseDigestChallenge(resp.Header.Get("WWW-Authenticate"))
 	drainAndClose(resp.Body)
-
-	chal, err := parseDigestChallenge(challengeHdr)
 	if err != nil {
 		return fmt.Errorf("parse challenge: %w", err)
 	}
-	auth := buildDigestResponse(http.MethodGet, requestTarget, s.User, s.Pass, chal)
 
-	resp2, err := d.send(ctx, target, auth)
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return fmt.Errorf("parse door url: %w", err)
+	}
+	auth := buildDigestResponse(http.MethodGet, parsed.RequestURI(), s.User, s.Pass, chal)
+
+	authed, err := d.send(ctx, target, auth)
 	if err != nil {
 		return err
 	}
-	defer drainAndClose(resp2.Body)
-
-	if resp2.StatusCode != http.StatusOK {
-		body := readShortBody(resp2.Body)
-		return fmt.Errorf("auth failed: status %d: %s", resp2.StatusCode, body)
+	defer drainAndClose(authed.Body)
+	if authed.StatusCode != http.StatusOK {
+		logBody(streamID, authed)
+		return fmt.Errorf("auth failed: status %d", authed.StatusCode)
 	}
 	return nil
 }
@@ -144,7 +142,15 @@ func drainAndClose(rc io.ReadCloser) {
 	_ = rc.Close()
 }
 
-func readShortBody(rc io.ReadCloser) string {
-	b, _ := io.ReadAll(io.LimitReader(rc, 1024))
-	return strings.TrimSpace(string(b))
+// logBody records the camera's response body to server logs for debugging
+// failed door-open attempts. It MUST NOT return the body to the caller —
+// devices have been observed returning HTML, which would end up rendered
+// inside http.Error if propagated.
+func logBody(streamID string, resp *http.Response) {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	body := strings.TrimSpace(string(b))
+	if body == "" {
+		return
+	}
+	log.Printf("door [%s] http %d body: %s", streamID, resp.StatusCode, body)
 }

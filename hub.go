@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -29,21 +31,28 @@ type Hub struct {
 	streams     []StreamConfig
 	streamsByID map[string]StreamConfig
 	tracks      map[string]*webrtc.TrackLocalStaticRTP
-
-	runners map[string]*streamRunner
+	runners     map[string]*streamRunner
 
 	mu       sync.Mutex
 	sessions map[string]*webrtc.PeerConnection
 }
 
 // streamRunner tracks the RTSP reader currently feeding a stream's track.
-// Switching quality cancels the active reader, waits for it to exit so
-// only one writer ever touches the track, then starts a new one.
+// mu serializes start/stop transitions; quality is stored atomically so
+// publicStreams() can read it without blocking on a stop-in-progress
+// (which holds mu while waiting for the reader goroutine to exit).
 type streamRunner struct {
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	done    chan struct{}
-	quality string // "sd" or "hd"
+	quality atomic.Pointer[string]
+}
+
+func (r *streamRunner) Quality() string {
+	if p := r.quality.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // Quality values exchanged with the browser. Mapped to Dahua RTSP subtype
@@ -60,8 +69,13 @@ func subtypeFor(quality string) int {
 	return 1
 }
 
-// NewHub creates the hub and immediately starts an SD-quality RTSP reader
-// for every configured stream. The readers stop when ctx is cancelled.
+// sessionAnswerTimeout caps how long an unanswered SDP offer can hold a
+// PeerConnection open. Without it, a browser that fetches /webrtc/offer
+// and then walks away would leak one PC + its RTCP-drain goroutines.
+const sessionAnswerTimeout = 30 * time.Second
+
+// NewHub creates the hub and immediately starts an HD-quality RTSP reader
+// for every configured stream. Readers stop when ctx is cancelled.
 func NewHub(ctx context.Context, streams []StreamConfig) (*Hub, error) {
 	h := &Hub{
 		parentCtx:   ctx,
@@ -89,17 +103,17 @@ func NewHub(ctx context.Context, streams []StreamConfig) (*Hub, error) {
 	return h, nil
 }
 
-func (h *Hub) Track(streamID string) *webrtc.TrackLocalStaticRTP {
-	return h.tracks[streamID]
-}
-
-// startReader cancels any active reader for streamID, waits for it to exit
-// (so two readers don't briefly write to the same track), and launches a
-// new one at the requested quality. Caller must NOT hold runner.mu.
+// startReader switches the active RTSP reader for streamID to the given
+// quality. It is a no-op if a reader at that quality is already running.
+// Two concurrent calls for different qualities serialise on runner.mu.
 func (h *Hub) startReader(streamID, quality string) {
 	runner := h.runners[streamID]
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
+
+	if runner.cancel != nil && runner.Quality() == quality {
+		return
+	}
 
 	if runner.cancel != nil {
 		runner.cancel()
@@ -110,18 +124,22 @@ func (h *Hub) startReader(streamID, quality string) {
 	done := make(chan struct{})
 	runner.cancel = cancel
 	runner.done = done
-	runner.quality = quality
+	q := quality
+	runner.quality.Store(&q)
 
 	s := h.streamsByID[streamID]
+	track := h.tracks[streamID]
 	subtype := subtypeFor(quality)
 	go func() {
 		defer close(done)
-		runRTSPReader(ctx, s, h, subtype)
+		runRTSPReader(ctx, s, track, subtype)
 	}()
 }
 
 // SetQuality switches a stream between "sd" and "hd". It is a no-op if the
-// stream is already at the requested quality.
+// stream is already at the requested quality. Equality is checked again
+// inside startReader under runner.mu, so two simultaneous toggles can't
+// trigger two reconnects.
 func (h *Hub) SetQuality(streamID, quality string) error {
 	if quality != qualitySD && quality != qualityHD {
 		return fmt.Errorf("invalid quality %q (use 'sd' or 'hd')", quality)
@@ -129,21 +147,15 @@ func (h *Hub) SetQuality(streamID, quality string) error {
 	if _, ok := h.streamsByID[streamID]; !ok {
 		return fmt.Errorf("%w: %q", errUnknownStream, streamID)
 	}
-	if h.Quality(streamID) == quality {
-		return nil
-	}
 	h.startReader(streamID, quality)
 	return nil
 }
 
 func (h *Hub) Quality(streamID string) string {
-	runner := h.runners[streamID]
-	if runner == nil {
-		return ""
+	if r := h.runners[streamID]; r != nil {
+		return r.Quality()
 	}
-	runner.mu.Lock()
-	defer runner.mu.Unlock()
-	return runner.quality
+	return ""
 }
 
 // publicStream is the browser-facing view of a stream — id, name, and
@@ -179,8 +191,7 @@ type offerResponse struct {
 // configured stream, generates an SDP offer with full ICE candidates, and
 // returns it to the browser along with a session ID.
 func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requirePost(w, r) {
 		return
 	}
 
@@ -191,8 +202,7 @@ func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, s := range h.streams {
-		track := h.tracks[s.ID]
-		sender, err := pc.AddTrack(track)
+		sender, err := pc.AddTrack(h.tracks[s.ID])
 		if err != nil {
 			pc.Close()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -226,18 +236,23 @@ func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("session %s state: %s", sid, state)
-		isTerminal := state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateClosed ||
-			state == webrtc.PeerConnectionStateDisconnected
-		if !isTerminal {
+		// Disconnected is recoverable: pion may flip back to Connected
+		// once ICE re-checks. Only clean up on truly terminal states.
+		if state != webrtc.PeerConnectionStateFailed && state != webrtc.PeerConnectionStateClosed {
 			return
 		}
-		h.mu.Lock()
-		if cur, ok := h.sessions[sid]; ok && cur == pc {
-			delete(h.sessions, sid)
+		h.dropSession(sid, pc)
+	})
+
+	// Reaper: a session with no answer after sessionAnswerTimeout is a
+	// browser that fetched /webrtc/offer and never came back. Close the
+	// PC so its drainRTCP goroutines exit.
+	time.AfterFunc(sessionAnswerTimeout, func() {
+		if pc.RemoteDescription() != nil {
+			return
 		}
-		h.mu.Unlock()
-		_ = pc.Close()
+		log.Printf("session %s expired without answer", sid)
+		h.dropSession(sid, pc)
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -249,6 +264,15 @@ func (h *Hub) HandleOffer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Hub) dropSession(sid string, pc *webrtc.PeerConnection) {
+	h.mu.Lock()
+	if cur, ok := h.sessions[sid]; ok && cur == pc {
+		delete(h.sessions, sid)
+	}
+	h.mu.Unlock()
+	_ = pc.Close()
+}
+
 type answerRequest struct {
 	SessionID string `json:"sessionId"`
 	SDP       string `json:"sdp"`
@@ -256,8 +280,7 @@ type answerRequest struct {
 
 // HandleAnswer applies the browser's SDP answer to an open session.
 func (h *Hub) HandleAnswer(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requirePost(w, r) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
@@ -296,8 +319,7 @@ func (h *Hub) HandleAnswer(w http.ResponseWriter, r *http.Request) {
 // keep retrying with backoff, and the browser cell will simply stop
 // receiving frames until the user picks a different quality.
 func (h *Hub) HandleSetQuality(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requirePost(w, r) {
 		return
 	}
 	id := r.URL.Query().Get("id")
@@ -317,6 +339,16 @@ func (h *Hub) HandleSetQuality(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("set quality [%s]: %s", id, quality)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// requirePost rejects non-POST requests with 405 and returns false. The
+// handler should return immediately when this returns false.
+func requirePost(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	return true
 }
 
 func drainRTCP(sender *webrtc.RTPSender) {

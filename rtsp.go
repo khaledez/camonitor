@@ -57,16 +57,10 @@ type trackWriter interface {
 }
 
 // runRTSPReader keeps a stream connected with bounded exponential backoff
-// and forwards every received H.264 RTP packet into the hub's track. The
-// subtype selects the Dahua stream variant (0 = main / HD, 1 = sub / SD).
-// It exits only when ctx is cancelled.
-func runRTSPReader(ctx context.Context, s StreamConfig, hub *Hub, subtype int) {
-	track := hub.Track(s.ID)
-	if track == nil {
-		log.Printf("[%s] no track registered; aborting reader", s.ID)
-		return
-	}
-
+// and forwards every received H.264 RTP packet into the supplied track.
+// The subtype selects the Dahua stream variant (0 = main / HD, 1 = sub /
+// SD). It exits only when ctx is cancelled.
+func runRTSPReader(ctx context.Context, s StreamConfig, track trackWriter, subtype int) {
 	backoff := minBackoff
 	for {
 		if ctx.Err() != nil {
@@ -154,6 +148,12 @@ type rtspConn struct {
 
 	cseq    int
 	session string // returned in SETUP, sent on subsequent requests
+
+	// readBuf is reused across every interleaved frame on this connection.
+	// 64 KiB matches the maximum length expressible in the 16-bit length
+	// field; in practice frames are MTU-bounded and far smaller. Per-conn
+	// scratch saves a per-packet allocation on the hot path.
+	readBuf [64 * 1024]byte
 }
 
 func newRTSPConn(conn net.Conn, source *url.URL) *rtspConn {
@@ -263,7 +263,7 @@ func (rc *rtspConn) readInterleaved() (channel byte, payload []byte, err error) 
 				return 0, nil, err
 			}
 			length := binary.BigEndian.Uint16(hdr[1:3])
-			buf := make([]byte, length)
+			buf := rc.readBuf[:length]
 			if _, err := io.ReadFull(rc.br, buf); err != nil {
 				return 0, nil, err
 			}
@@ -304,7 +304,8 @@ func (rc *rtspConn) do(method, uri string, headers map[string]string) (*rtspResp
 		if err != nil {
 			return resp, fmt.Errorf("parse challenge: %w", err)
 		}
-		authHeaders := cloneHeaders(headers)
+		authHeaders := make(map[string]string, len(headers)+1)
+		maps.Copy(authHeaders, headers)
 		authHeaders["Authorization"] = buildDigestResponse(method, uri, rc.user, rc.pass, chal)
 		resp, err = rc.send(method, uri, authHeaders)
 		if err != nil {
@@ -396,19 +397,11 @@ func readResponse(br *bufio.Reader) (*rtspResponse, error) {
 	return resp, nil
 }
 
-func cloneHeaders(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in)+1)
-	maps.Copy(out, in)
-	return out
-}
-
 // sessionIDOnly returns the bare session ID from a Session header value,
 // stripping any "timeout=NN" parameter that follows.
 func sessionIDOnly(value string) string {
-	if i := strings.IndexByte(value, ';'); i >= 0 {
-		value = value[:i]
-	}
-	return strings.TrimSpace(value)
+	id, _, _ := strings.Cut(value, ";")
+	return strings.TrimSpace(id)
 }
 
 // ---- SDP --------------------------------------------------------------
@@ -453,14 +446,12 @@ func findH264ControlURL(sdp, baseURI string) (string, error) {
 		case strings.HasPrefix(line, "a=control:") && inMedia:
 			current.control = strings.TrimPrefix(line, "a=control:")
 		case strings.HasPrefix(line, "a=rtpmap:") && inMedia:
-			v := strings.TrimPrefix(line, "a=rtpmap:")
-			sp := strings.IndexByte(v, ' ')
-			if sp < 0 {
+			pt, rest, ok := strings.Cut(strings.TrimPrefix(line, "a=rtpmap:"), " ")
+			if !ok {
 				continue
 			}
-			pt := v[:sp]
-			codec := strings.ToUpper(strings.SplitN(v[sp+1:], "/", 2)[0])
-			current.codecs[pt] = codec
+			codecName, _, _ := strings.Cut(rest, "/")
+			current.codecs[pt] = strings.ToUpper(codecName)
 		}
 	}
 	if current != nil {

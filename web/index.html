@@ -77,6 +77,7 @@ function setStatus(text, kind) {
 
 let pc = null;
 let selectedCell = null;
+let connecting = false;
 
 function selectCell(cell) {
   if (selectedCell) selectedCell.classList.remove('selected');
@@ -137,13 +138,39 @@ async function openDoor(streamId, button) {
   }
 }
 
-async function connect() {
+function teardownConnection() {
+  // Stop any media tracks attached to <video> elements so the camera-side
+  // RTP doesn't keep flowing into orphaned MediaStreams while the new PC
+  // is being negotiated.
+  for (const video of grid.querySelectorAll('video')) {
+    if (video.srcObject) {
+      for (const t of video.srcObject.getTracks()) t.stop();
+      video.srcObject = null;
+    }
+  }
   if (pc) {
     try { pc.close(); } catch (_) {}
     pc = null;
   }
   grid.innerHTML = '';
   selectedCell = null;
+}
+
+async function connect() {
+  // A second click on "connect" while the first call is still awaiting
+  // /webrtc/offer would build two PeerConnections. Single-flight via
+  // `connecting`, releasing in finally so a thrown offer doesn't lock us.
+  if (connecting) return;
+  connecting = true;
+  try {
+    await connectInner();
+  } finally {
+    connecting = false;
+  }
+}
+
+async function connectInner() {
+  teardownConnection();
   setStatus('requesting offer…');
 
   const offer = await fetch('/webrtc/offer', {
