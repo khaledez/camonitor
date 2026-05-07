@@ -19,17 +19,47 @@ $EDITOR /etc/camonitor/config.json
 #    leading "v" — git tag v1.2.3 → image tag 1.2.3.
 docker run --rm \
   --name camonitor \
-  -p 8080:8080 \
+  --network host \
   -v /etc/camonitor/config.json:/etc/camonitor/config.json:ro \
   ghcr.io/khaledez/camonitor:latest
 ```
 
-Open <http://localhost:8080>. Each configured camera gets a tile in the
-grid with an `HD/SD` toggle (top-left) and an `open door` button
-(top-right).
+Open <http://localhost:8080> (or `http://<host-ip>:8080` from another
+device on the LAN). Each configured camera gets a tile in the grid with
+an `HD/SD` toggle (top-left) and an `open door` button (top-right).
 
 The published image is multi-arch (`linux/amd64`, `linux/arm64`) and is
 built `FROM scratch` — only the static binary is in it (~14&nbsp;MB).
+
+### Networking — reaching cameras on your LAN
+
+camonitor makes outbound RTSP and HTTP connections to each configured
+camera. Those cameras almost always live on the host's local network
+(e.g. `192.168.x.x`), and the container needs a path to them.
+
+`--network host` is the simplest and most reliable way to make that
+happen. The container shares the host's network namespace, so it sees
+the LAN exactly as the host does — no NAT, no port juggling, and the
+camera sees the host's real IP (which matters if you've configured an
+allowlist on the device). With `--network host` you don't need
+`-p 8080:8080`; the service binds straight to port 8080 on the host.
+
+Alternatives if host networking isn't an option:
+
+- **Default bridge with port publish** — replace `--network host` with
+  `-p 8080:8080`. On Linux this almost always works because Docker NATs
+  the container's outbound traffic onto the LAN. Cameras will see the
+  host's IP for inbound requests.
+
+- **Docker Desktop on macOS/Windows** — host networking is supported
+  natively as of Docker Desktop 4.34. On older versions, fall back to
+  `-p 8080:8080`; outbound bridge traffic to LAN devices still works,
+  it just routes through Docker Desktop's VM.
+
+- **macvlan** — only worth it if you need the container to have its own
+  IP on the LAN (e.g. to satisfy a strict camera-side allowlist that
+  rejects the host's IP). Significantly more setup; refer to the
+  [Docker macvlan docs](https://docs.docker.com/network/drivers/macvlan/).
 
 ## Configuration
 
