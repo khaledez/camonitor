@@ -149,7 +149,9 @@ func startTailscale(hostname string) (*tsnet.Server, net.Listener, net.PacketCon
 		return nil, nil, nil, fmt.Errorf("tsnet start: %w", err)
 	}
 
-	udp, err := ts.ListenPacket("udp", ":0")
+	// tsnet rejects ":0" (host part required). 0.0.0.0:0 binds on the
+	// tsnet virtual interface with an OS-assigned port.
+	udp, err := ts.ListenPacket("udp", "0.0.0.0:0")
 	if err != nil {
 		ts.Close()
 		return nil, nil, nil, fmt.Errorf("tsnet udp: %w", err)
