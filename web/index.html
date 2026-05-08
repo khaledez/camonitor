@@ -310,6 +310,8 @@ async function connectInner() {
     doorBtn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       selectCell(cell);
+      const confirmed = window.confirm('Open door for ' + (s.name || s.id) + '?');
+      if (!confirmed) return;
       openDoor(s.id, doorBtn);
     });
     cell.appendChild(doorBtn);
