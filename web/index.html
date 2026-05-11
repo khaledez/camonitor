@@ -144,6 +144,11 @@
   #side .wa-state .pill.paired   { background: #2d6a3e; color: #b8e0c0; }
   #side .wa-state .pill.unpaired { background: #6a4a2d; color: #f0c060; }
   #side .wa-state .pill.off      { background: #3a3a3f; color: #888; }
+  /* Restore the [hidden] semantics inside #side. Our scoped rules below
+     (e.g. .qr-wrap { display: flex }) would otherwise outrank the UA
+     default of `[hidden] { display: none }`, leaving an empty QR slot
+     visible in the "not configured" / paired states. */
+  #side [hidden] { display: none !important; }
   #side .qr-wrap {
     margin-top: 10px; display: flex; flex-direction: column; align-items: center;
   }
