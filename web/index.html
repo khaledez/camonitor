@@ -86,6 +86,110 @@
     display: none;
   }
   .cell.stalled .stalled-flag { display: block; }
+  /* Ring overlay: shown for ~20s after the bell rings on a stream, with
+     the snapshot the camera took the instant the button was pressed. */
+  .cell .ring-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    background: rgba(0,0,0,.78);
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 8px; padding: 12px;
+  }
+  .cell.ringing .ring-overlay { display: flex; }
+  .cell .ring-overlay .label {
+    position: static; background: none; font-size: 14px;
+    color: #f0c060; font-weight: 600;
+  }
+  .cell .ring-overlay img {
+    max-width: 100%; max-height: 70%;
+    border: 2px solid #f0c060; border-radius: 4px;
+    object-fit: contain;
+  }
+  .cell .ring-overlay .dismiss {
+    margin-top: 6px;
+  }
+  /* Ring pulse highlight on the cell border for the same duration. */
+  .cell.ringing { animation: cam-ring-pulse 1.2s ease-in-out infinite; }
+  @keyframes cam-ring-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px #f0c06080 inset; }
+    50%      { box-shadow: 0 0 0 4px #f0c060 inset; }
+  }
+  /* Side panel for WhatsApp status + ring history. Slides in from the
+     right when the user clicks the header "bell" button. */
+  #side {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 360px;
+    background: #161618; border-left: 1px solid #2a2a2e;
+    transform: translateX(100%); transition: transform 0.2s ease-out;
+    display: flex; flex-direction: column; z-index: 10;
+  }
+  #side.open { transform: translateX(0); }
+  #side h2 {
+    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #side h2 .close { margin-left: auto; }
+  #side .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
+  #side .section h3 {
+    margin: 0 0 8px 0; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: #888;
+  }
+  #side .wa-state {
+    font-size: 13px; line-height: 1.5;
+  }
+  #side .wa-state .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; margin-left: 4px;
+  }
+  #side .wa-state .pill.paired   { background: #2d6a3e; color: #b8e0c0; }
+  #side .wa-state .pill.unpaired { background: #6a4a2d; color: #f0c060; }
+  #side .wa-state .pill.off      { background: #3a3a3f; color: #888; }
+  #side .qr-wrap {
+    margin-top: 10px; display: flex; flex-direction: column; align-items: center;
+  }
+  #side .qr-wrap img {
+    width: 240px; height: 240px; image-rendering: pixelated;
+    background: #fff; padding: 8px; border-radius: 4px;
+  }
+  #side .qr-wrap .hint { font-size: 11px; color: #888; margin-top: 6px; text-align: center; }
+  #side .recipients { margin: 6px 0 0 0; padding: 0; list-style: none; font-size: 13px; }
+  #side .recipients li {
+    padding: 4px 0; border-bottom: 1px dashed #2a2a2e;
+    font-variant-numeric: tabular-nums;
+  }
+  #side .recipients li:last-child { border-bottom: none; }
+  #side .history { flex: 1; overflow-y: auto; padding: 0; }
+  #side .history .empty { padding: 16px; color: #666; font-size: 13px; text-align: center; }
+  #side .ring-item {
+    display: flex; gap: 10px; padding: 8px 16px;
+    border-bottom: 1px solid #2a2a2e; align-items: center;
+  }
+  #side .ring-item img {
+    width: 80px; height: 45px; object-fit: cover;
+    background: #000; border-radius: 3px; cursor: pointer;
+  }
+  #side .ring-item .meta { flex: 1; font-size: 12px; }
+  #side .ring-item .meta .name { font-weight: 600; color: #d6d6d6; }
+  #side .ring-item .meta .time { color: #888; }
+  #side-toggle {
+    position: relative;
+  }
+  #side-toggle .badge {
+    position: absolute; top: -4px; right: -4px;
+    background: #d97070; color: white; font-size: 10px;
+    min-width: 16px; height: 16px; border-radius: 8px;
+    display: none; align-items: center; justify-content: center;
+    padding: 0 4px; font-weight: 600;
+  }
+  #side-toggle.has-unread .badge { display: inline-flex; }
+  /* Snapshot lightbox: full-size view of a historical snapshot. */
+  #lightbox {
+    position: fixed; inset: 0; background: rgba(0,0,0,.9);
+    display: none; align-items: center; justify-content: center;
+    z-index: 20; cursor: pointer;
+  }
+  #lightbox.open { display: flex; }
+  #lightbox img { max-width: 90vw; max-height: 90vh; }
 </style>
 </head>
 <body>
@@ -93,8 +197,41 @@
   <h1>Camonitor</h1>
   <span id="status">disconnected</span>
   <button id="reconnect">connect</button>
+  <button id="side-toggle" title="WhatsApp &amp; ring history">
+    🔔
+    <span class="badge" id="side-badge">0</span>
+  </button>
 </header>
 <div class="grid" id="grid"></div>
+
+<aside id="side" aria-hidden="true">
+  <h2>
+    Bell
+    <button class="close" id="side-close">close</button>
+  </h2>
+
+  <div class="section">
+    <h3>WhatsApp</h3>
+    <div class="wa-state" id="wa-state">loading…</div>
+    <div class="qr-wrap" id="wa-qr-wrap" hidden>
+      <img id="wa-qr" alt="WhatsApp pairing QR" />
+      <div class="hint">
+        WhatsApp → Settings → Linked Devices → Link a Device.<br>
+        The QR rotates every ~20s; this view refreshes automatically.
+      </div>
+    </div>
+    <ul class="recipients" id="wa-recipients"></ul>
+  </div>
+
+  <div class="section" style="flex: 0 0 auto;">
+    <h3>Ring history</h3>
+  </div>
+  <div class="history" id="history">
+    <div class="empty">no rings yet</div>
+  </div>
+</aside>
+
+<div id="lightbox"><img id="lightbox-img" alt="snapshot" /></div>
 
 <script>
 const statusEl = document.getElementById('status');
@@ -109,6 +246,10 @@ function setStatus(text, kind) {
 let pc = null;
 let selectedCell = null;
 let connecting = false;
+// Module-scope so the SSE ring handler can find a tile by stream ID even
+// though the lookup map is rebuilt by every connect(). connect() reassigns
+// this; SSE handlers always read the latest value.
+let cellsByStreamId = {};
 
 function selectCell(cell) {
   if (selectedCell) selectedCell.classList.remove('selected');
@@ -253,6 +394,9 @@ async function connectInner() {
   // Build cells in the same order the server lists streams. ontrack events
   // fire in transceiver/m-line order, which matches.
   const cells = {}; // keyed by the server's WebRTC stream ID ("vto-<id>")
+  // Reset the module-scope lookup; SSE ring events identify the stream by
+  // its config ID (no "vto-" prefix), so we maintain a parallel map.
+  cellsByStreamId = {};
   for (const s of offer.streams) {
     const cell = document.createElement('div');
     cell.className = 'cell';
@@ -321,11 +465,32 @@ async function connectInner() {
     stalledFlag.textContent = 'no frames';
     cell.appendChild(stalledFlag);
 
+    const ringOverlay = document.createElement('div');
+    ringOverlay.className = 'ring-overlay';
+    const ringLabel = document.createElement('div');
+    ringLabel.className = 'label';
+    ringLabel.textContent = '🔔 ringing…';
+    const ringImg = document.createElement('img');
+    ringImg.alt = 'snapshot at ring';
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'dismiss';
+    dismissBtn.textContent = 'dismiss';
+    dismissBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      cell.classList.remove('ringing');
+    });
+    ringOverlay.appendChild(ringLabel);
+    ringOverlay.appendChild(ringImg);
+    ringOverlay.appendChild(dismissBtn);
+    cell.appendChild(ringOverlay);
+
     grid.appendChild(cell);
     // Index by the WebRTC stream ID the server uses ("vto-<id>") so
     // ontrack events can find the right cell — needed now that each
-    // stream carries both a video and an audio track.
-    cells['vto-' + s.id] = { cell, video, placeholder };
+    // stream carries both a video and an audio track. Ring overlay
+    // elements live alongside so the SSE handler can flash the right tile.
+    cells['vto-' + s.id] = { cell, video, placeholder, ringImg };
+    cellsByStreamId[s.id] = cells['vto-' + s.id];
   }
   if (grid.firstChild) selectCell(grid.firstChild);
 
@@ -394,6 +559,216 @@ reconnectBtn.addEventListener('click', () => {
 connect().catch(err => {
   console.error(err);
   setStatus('error: ' + err.message, 'err');
+});
+
+// Ring overlay: SSE feed from /events emits one `ring` event per
+// non-debounced bell press. EventSource auto-reconnects, so this survives
+// WebRTC reconnects, server restarts (after a backoff), and tab sleep.
+// The overlay clears itself after 30s if the user doesn't dismiss it.
+const ringEvents = new EventSource('/events');
+let ringTimers = {}; // streamId -> setTimeout handle
+ringEvents.addEventListener('ring', (e) => {
+  let payload;
+  try { payload = JSON.parse(e.data); } catch (_) { return; }
+  // Live cell overlay
+  const target = cellsByStreamId[payload.id];
+  if (target) {
+    // Prefer the event-specific snapshot (it's the exact frame at ring
+    // time and is immutable, so caches behave); fall back to ?id= if
+    // the event ID is somehow missing.
+    const src = payload.eventId
+      ? '/snapshot?event=' + encodeURIComponent(payload.eventId)
+      : '/snapshot?id=' + encodeURIComponent(payload.id) +
+          '&t=' + new Date(payload.time).getTime();
+    target.ringImg.src = src;
+    target.cell.classList.add('ringing');
+    if (ringTimers[payload.id]) clearTimeout(ringTimers[payload.id]);
+    ringTimers[payload.id] = setTimeout(() => {
+      target.cell.classList.remove('ringing');
+      delete ringTimers[payload.id];
+    }, 30000);
+  }
+  // Prepend to the history panel; bump the unread badge if the panel
+  // isn't currently open so the user knows there's something new.
+  prependHistoryItem(payload);
+  if (!sideEl.classList.contains('open')) bumpUnread();
+});
+ringEvents.onerror = () => { /* EventSource retries on its own */ };
+
+// ── Side panel: WhatsApp status + ring history ──────────────────────────
+const sideEl = document.getElementById('side');
+const sideToggle = document.getElementById('side-toggle');
+const sideClose = document.getElementById('side-close');
+const sideBadge = document.getElementById('side-badge');
+const waStateEl = document.getElementById('wa-state');
+const waQRWrap = document.getElementById('wa-qr-wrap');
+const waQRImg = document.getElementById('wa-qr');
+const waRecipients = document.getElementById('wa-recipients');
+const historyEl = document.getElementById('history');
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightbox-img');
+
+let unreadCount = 0;
+function bumpUnread() {
+  unreadCount += 1;
+  sideBadge.textContent = unreadCount > 99 ? '99+' : String(unreadCount);
+  sideToggle.classList.add('has-unread');
+}
+function clearUnread() {
+  unreadCount = 0;
+  sideToggle.classList.remove('has-unread');
+}
+
+let waPollTimer = null;
+function startWAPolling() {
+  if (waPollTimer) return;
+  refreshWA(); // immediate
+  waPollTimer = setInterval(refreshWA, 5000);
+}
+function stopWAPolling() {
+  if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+}
+
+async function refreshWA() {
+  let st;
+  try {
+    st = await fetch('/wa/status').then(r => r.json());
+  } catch (_) {
+    waStateEl.textContent = 'status unavailable';
+    return;
+  }
+  if (!st.configured) {
+    waStateEl.innerHTML = 'WhatsApp <span class="pill off">not configured</span>' +
+      '<div style="color:#888;margin-top:6px;font-size:12px;">' +
+      'Add a <code>whatsapp</code> block to config.json to enable bell notifications.' +
+      '</div>';
+    waQRWrap.hidden = true;
+    waRecipients.innerHTML = '';
+    stopWAPolling();
+    return;
+  }
+  if (st.paired) {
+    const jid = (st.jid || '').split(':')[0].split('@')[0];
+    waStateEl.innerHTML = 'WhatsApp <span class="pill paired">paired</span>' +
+      (jid ? '<div style="color:#888;margin-top:4px;font-size:12px;">linked as +' + jid + '</div>' : '');
+    waQRWrap.hidden = true;
+    stopWAPolling();
+  } else {
+    waStateEl.innerHTML = 'WhatsApp <span class="pill unpaired">waiting for QR scan</span>';
+    if (st.hasQR) {
+      // Cache-bust on every poll so a rotated QR shows up.
+      waQRImg.src = '/wa/qr.png?t=' + Date.now();
+      waQRWrap.hidden = false;
+    } else {
+      waQRWrap.hidden = true;
+    }
+  }
+  waRecipients.innerHTML = '';
+  for (const num of (st.recipients || [])) {
+    const li = document.createElement('li');
+    li.textContent = num;
+    waRecipients.appendChild(li);
+  }
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'medium' });
+}
+
+function makeRingItem(ev) {
+  const item = document.createElement('div');
+  item.className = 'ring-item';
+  if (ev.hasSnapshot) {
+    const img = document.createElement('img');
+    img.src = '/snapshot?event=' + encodeURIComponent(ev.eventId);
+    img.alt = 'snapshot';
+    img.addEventListener('click', () => {
+      lightboxImg.src = img.src;
+      lightbox.classList.add('open');
+    });
+    item.appendChild(img);
+  } else {
+    const ph = document.createElement('div');
+    ph.style.cssText = 'width:80px;height:45px;background:#222;border-radius:3px;display:flex;align-items:center;justify-content:center;color:#555;font-size:10px;';
+    ph.textContent = 'no img';
+    item.appendChild(ph);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const nm = document.createElement('div');
+  nm.className = 'name';
+  nm.textContent = ev.name || ev.id;
+  const tm = document.createElement('div');
+  tm.className = 'time';
+  tm.textContent = fmtTime(ev.time);
+  meta.appendChild(nm);
+  meta.appendChild(tm);
+  item.appendChild(meta);
+  return item;
+}
+
+function prependHistoryItem(ev) {
+  // First insert clears the "no rings yet" placeholder.
+  const empty = historyEl.querySelector('.empty');
+  if (empty) empty.remove();
+  historyEl.insertBefore(makeRingItem(ev), historyEl.firstChild);
+  // Cap the DOM list at the server's history cap (50) to match.
+  while (historyEl.children.length > 50) historyEl.removeChild(historyEl.lastChild);
+}
+
+async function loadHistory() {
+  let rings;
+  try {
+    rings = await fetch('/rings').then(r => r.json());
+  } catch (_) { return; }
+  historyEl.innerHTML = '';
+  if (!rings || rings.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'no rings yet';
+    historyEl.appendChild(empty);
+    return;
+  }
+  for (const ev of rings) historyEl.appendChild(makeRingItem(ev));
+}
+
+sideToggle.addEventListener('click', () => {
+  const opening = !sideEl.classList.contains('open');
+  sideEl.classList.toggle('open');
+  sideEl.setAttribute('aria-hidden', !opening);
+  if (opening) {
+    clearUnread();
+    refreshWA();
+    startWAPolling();
+    loadHistory();
+  } else {
+    stopWAPolling();
+  }
+});
+sideClose.addEventListener('click', () => {
+  sideEl.classList.remove('open');
+  sideEl.setAttribute('aria-hidden', 'true');
+  stopWAPolling();
+});
+lightbox.addEventListener('click', () => lightbox.classList.remove('open'));
+
+// One initial WA status check so we can show the pairing alert immediately
+// if the server is unpaired — saves the user from having to open the panel
+// to discover they need to scan a QR.
+refreshWA().then(() => {
+  // If unpaired, auto-open the panel so the QR is in the user's face.
+  if (waQRImg && !waQRWrap.hidden) {
+    sideEl.classList.add('open');
+    sideEl.setAttribute('aria-hidden', 'false');
+    startWAPolling();
+    loadHistory();
+  }
 });
 </script>
 </body>

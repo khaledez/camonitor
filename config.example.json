@@ -1,19 +1,31 @@
 {
   "listen": ":8080",
+  "sip": {
+    "bind": ":5060",
+    "contact_host": ""
+  },
+  "whatsapp": {
+    "session": "/var/lib/camonitor/wa.db",
+    "recipients": ["+15551234567", "+15557654321"]
+  },
   "streams": [
     {
       "id": "vto1",
       "name": "Front Door",
       "host": "192.168.88.200",
       "user": "admin",
-      "pass": "REPLACE_ME"
+      "pass": "REPLACE_ME",
+      "sip_ext": "9901",
+      "sip_pass": "REPLACE_ME"
     },
     {
       "id": "vto2",
       "name": "Gate",
       "host": "192.168.88.202",
       "user": "admin",
-      "pass": "REPLACE_ME"
+      "pass": "REPLACE_ME",
+      "sip_ext": "9902",
+      "sip_pass": "REPLACE_ME"
     }
   ]
 }

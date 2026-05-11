@@ -21,6 +21,7 @@ docker run --rm \
   --name camonitor \
   --network host \
   -v /etc/camonitor/config.json:/etc/camonitor/config.json:ro \
+  -v /var/lib/camonitor:/var/lib/camonitor \
   ghcr.io/khaledez/camonitor:latest
 ```
 
@@ -28,8 +29,18 @@ Open <http://localhost:8080> (or `http://<host-ip>:8080` from another
 device on the LAN). Each configured camera gets a tile in the grid with
 an `HD/SD` toggle (top-left) and an `open door` button (top-right).
 
+The bind mount on `/var/lib/camonitor` only matters if you enable the
+WhatsApp bell-notification feature — it persists the linked-device session
+so you only scan the QR code once. Skip it if you're not using WhatsApp.
+
 The published image is multi-arch (`linux/amd64`, `linux/arm64`) and is
-built `FROM scratch` — only the static binary is in it (~14&nbsp;MB).
+built `FROM scratch` — only the static binary is in it. With WhatsApp /
+SIP support bundled in it now sits at ~65&nbsp;MB (modernc.org/sqlite is
+the bulk of the growth).
+
+SIP runs on UDP/5060 by default. `--network host` is the simplest way to
+expose that port; under bridge networking add `-p 5060:5060/udp` and set
+`sip.contact_host` to the host's LAN IP so the VTO can route INVITEs back.
 
 ### Networking — reaching cameras on your LAN
 
@@ -99,6 +110,8 @@ let camonitor build the Dahua-specific URLs.
 | `pass`     |          | Account password. |
 | `rtsp_url` | no       | Override for the full RTSP URL. Use this for non-Dahua cameras or non-default channels/subtypes. |
 | `door_url` | no       | Override for the door-open HTTP endpoint. Use this if your VTO firmware exposes a different path. |
+| `sip_ext`  | no       | SIP extension number to register on the VTO's built-in SIP server (e.g. `9901`). Set this to receive bell-press notifications; leave empty to disable SIP for this camera. |
+| `sip_pass` | no       | Password for `sip_ext`. Configured on the VTO under *Talk → Management*. |
 
 ¹ `host` is required unless both `rtsp_url` and `door_url` (if you want
 door support) are explicitly set.
@@ -128,6 +141,86 @@ return `401 Invalid Authority!` are usually answering a wrong digest
 response, not a permissions failure.
 
 If your VTO firmware uses a different path, set `door_url` per stream.
+
+## Bell notifications (SIP + WhatsApp)
+
+When the visitor presses the call button, the VTO sends a SIP `INVITE` to
+every extension registered on its built-in SIP server. camonitor can act
+as one of those extensions: on each ring it grabs a snapshot from the
+camera, flashes the corresponding tile in any open browser, and ships
+the image to a list of WhatsApp recipients.
+
+Per-camera setup on the VTO (one-time, via its web UI):
+
+1. *Network → SIP Server* — enable the built-in SIP server.
+2. *Talk → Management* (sometimes *VTH Management*) — add an extension
+   for camonitor. Note the extension number and password.
+3. Add the new extension to the call/ring group so pressing the call
+   button rings it.
+
+Then in `config.json`:
+
+```json
+{
+  "sip": { "bind": ":5060", "contact_host": "" },
+  "whatsapp": {
+    "session": "/var/lib/camonitor/wa.db",
+    "recipients": ["+15551234567", "+15557654321"]
+  },
+  "streams": [
+    { "id": "vto1", "host": "192.168.88.200", "user": "admin",
+      "pass": "...", "sip_ext": "9901", "sip_pass": "..." }
+  ]
+}
+```
+
+`sip.bind` is the local UDP address camonitor listens on (default
+`:5060`). `sip.contact_host` is what we advertise to the VTO; leave it
+empty to auto-detect the host's primary LAN IPv4 — that works under
+`--network host`. Set it explicitly if you're multi-homed or running
+under bridge networking.
+
+`whatsapp.session` is a SQLite file that holds the linked-device session.
+Mount it on a persistent volume so first-time QR pairing only happens
+once. `whatsapp.recipients` are E.164 phone numbers (the leading `+` is
+optional; everything except digits is stripped).
+
+### First-time WhatsApp pairing
+
+On first run camonitor surfaces the pairing QR two ways — pick whichever
+is easier:
+
+- **Web UI** (preferred). Open the page in a browser; the side panel
+  auto-opens with the QR and pairing instructions. The panel polls and
+  refreshes the QR as whatsmeow rotates it (every ~20s).
+- **Terminal** as a fallback. The same QR is printed to stdout as a
+  half-block ASCII rendering, so `docker logs -f camonitor` works for
+  headless setups.
+
+In WhatsApp on your phone, go to *Settings → Linked Devices → Link a
+Device* and scan. The session persists to `whatsapp.session`;
+subsequent restarts skip the QR step.
+
+The same side panel also shows the list of configured recipients and the
+last 50 ring events with thumbnails. Click any thumbnail for a full-size
+view of the snapshot the camera captured at the instant the bell rang.
+
+Notes:
+
+- camonitor replies `486 Busy Here` to every `INVITE` — the visitor's
+  side at the VTO hears a beep, but no two-way audio is established
+  (phase 2 work). The snapshot + WhatsApp + browser notification still
+  fire on every press.
+- Bell events are debounced per stream (~15s) so a kid mashing the
+  button doesn't spam your phone.
+- If `whatsapp` is omitted from config, the SSE/browser path still
+  works — only WhatsApp delivery is skipped. Likewise, streams without
+  `sip_ext` don't register; their RTSP/door functionality is unchanged.
+- WhatsApp delivery here uses the unofficial whatsmeow library (same
+  protocol as WhatsApp Web). It works with personal numbers and needs
+  no Meta Business account, but is technically against WhatsApp ToS.
+  For low-volume household use the practical risk is small; if you
+  need an ToS-clean path, swap in the WhatsApp Cloud API.
 
 ## Run from source
 

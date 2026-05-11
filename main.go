@@ -48,6 +48,13 @@ type StreamConfig struct {
 	User string `json:"user"`
 	Pass string `json:"pass"`
 
+	// SIP credentials. When SIPExt is set, camonitor registers as that
+	// extension on the VTO's built-in SIP server and receives an INVITE
+	// when the call button is pressed. Empty means "no SIP for this
+	// stream" — door/RTSP/snapshot still work without these.
+	SIPExt  string `json:"sip_ext,omitempty"`
+	SIPPass string `json:"sip_pass,omitempty"`
+
 	// Optional overrides — empty means "use the Dahua default".
 	RTSPURLOverride string `json:"rtsp_url,omitempty"`
 	DoorURLOverride string `json:"door_url,omitempty"`
@@ -84,8 +91,10 @@ func (s StreamConfig) DoorOpenURL() string {
 }
 
 type Config struct {
-	Listen  string         `json:"listen"`
-	Streams []StreamConfig `json:"streams"`
+	Listen   string          `json:"listen"`
+	SIP      SIPConfig       `json:"sip"`
+	WhatsApp *WhatsAppConfig `json:"whatsapp,omitempty"`
+	Streams  []StreamConfig  `json:"streams"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -234,6 +243,42 @@ func main() {
 
 	doors := NewDoorClient(cfg.Streams)
 
+	// WhatsApp is optional; nil sender means "skip the WA leg". The
+	// snapshot fetcher is unconditional — every bell event tries to grab
+	// a JPEG so the cached /snapshot endpoint always has the latest frame.
+	var waSend whatsappSender
+	var waClient *WhatsAppClient
+	if cfg.WhatsApp != nil {
+		waClient, err = NewWhatsAppClient(ctx, *cfg.WhatsApp)
+		if err != nil {
+			log.Fatalf("whatsapp: %v", err)
+		}
+		waSend = waClient.SendImage
+		defer waClient.Close()
+	} else {
+		log.Printf("whatsapp: not configured (skipping)")
+	}
+
+	snapClient := newSnapshotClient()
+	snapFetch := func(c context.Context, s StreamConfig) ([]byte, error) {
+		return FetchSnapshot(c, snapClient, s)
+	}
+	bell := NewBellBus(cfg.Streams, snapFetch, waSend)
+
+	sipSrv, err := NewSIPServer(cfg.SIP, cfg.Streams, bell)
+	if err != nil {
+		log.Fatalf("sip: %v", err)
+	}
+	if sipSrv != nil {
+		go func() {
+			if err := sipSrv.Run(ctx); err != nil {
+				log.Printf("sip: run exited: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("sip: not configured (no stream has sip_ext)")
+	}
+
 	staticFS, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatalf("embed: %v", err)
@@ -245,6 +290,21 @@ func main() {
 	mux.HandleFunc("/webrtc/answer", hub.HandleAnswer)
 	mux.HandleFunc("/stream/quality", hub.HandleSetQuality)
 	mux.HandleFunc("/door/open", doors.HandleOpen)
+	mux.HandleFunc("/events", bell.HandleEvents)
+	mux.HandleFunc("/snapshot", bell.HandleSnapshot)
+	mux.HandleFunc("/rings", bell.HandleHistory)
+	if waClient != nil {
+		mux.HandleFunc("/wa/status", waClient.HandleStatus)
+		mux.HandleFunc("/wa/qr.png", waClient.HandleQR)
+	} else {
+		// Static "not configured" status so the web UI can render its
+		// WhatsApp panel without conditionally fetching.
+		mux.HandleFunc("/wa/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(`{"configured":false,"paired":false,"recipients":[],"hasQR":false}`))
+		})
+	}
 
 	// The plain HTTP listener stays even when tailnet is enabled — it
 	// serves liveness/readiness probes from kubelet and any in-cluster
