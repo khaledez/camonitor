@@ -21,6 +21,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,13 @@ type SIPConfig struct {
 	// loopback IPv4). Override if auto-detection picks the wrong NIC
 	// (multi-homed host, Docker bridge networking, etc.).
 	ContactHost string `json:"contact_host"`
+	// ContactPort is the externally-reachable UDP port the VTO should send
+	// INVITEs to — usually the same as Bind's port. Set this separately
+	// when running under k8s with hostPort mapping a different host port
+	// to the pod's bind port (avoids conntrack collisions when sipgo
+	// shares its listener socket for outbound REGISTERs). Defaults to
+	// Bind's port.
+	ContactPort int `json:"contact_port,omitempty"`
 }
 
 type SIPServer struct {
@@ -83,9 +91,13 @@ func NewSIPServer(cfg SIPConfig, streams []StreamConfig, bell *BellBus) (*SIPSer
 		}
 		contactHost = ip
 	}
-	contactPort, err := portFromBind(cfg.Bind)
-	if err != nil {
-		return nil, fmt.Errorf("sip: parse bind: %w", err)
+	contactPort := cfg.ContactPort
+	if contactPort == 0 {
+		p, err := portFromBind(cfg.Bind)
+		if err != nil {
+			return nil, fmt.Errorf("sip: parse bind: %w", err)
+		}
+		contactPort = p
 	}
 
 	byHost := make(map[string]string, len(enabled))
@@ -193,10 +205,15 @@ func (s *SIPServer) handleCancel(req *sip.Request, tx sip.ServerTransaction) {
 // expiry. It exits when ctx is cancelled. Failures are logged and retried
 // with a fixed backoff — the VTO is on the same LAN so flakiness is rare,
 // and exponential backoff just delays recovery when the camera reboots.
+//
+// The refresh interval honors the server's Expires response (capped to
+// sipRegisterRefresh). Dahua firmware often clamps Expires to 60s
+// regardless of what we ask for, so we must re-register quickly.
 func (s *SIPServer) registerLoop(ctx context.Context, st StreamConfig) {
 	const retryWait = 30 * time.Second
 	for {
-		if err := s.registerOnce(ctx, st); err != nil {
+		expires, err := s.registerOnce(ctx, st)
+		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -208,19 +225,43 @@ func (s *SIPServer) registerLoop(ctx context.Context, st StreamConfig) {
 			}
 			continue
 		}
-		log.Printf("sip [%s]: registered as ext %s on %s", st.ID, st.SIPExt, st.Host)
+		refresh := refreshInterval(expires)
+		log.Printf("sip [%s]: registered as ext %s on %s (expires %ds; refresh in %s)",
+			st.ID, st.SIPExt, st.Host, expires, refresh)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(sipRegisterRefresh):
+		case <-time.After(refresh):
 		}
 	}
 }
 
+// refreshInterval picks a safe refresh window for the next REGISTER given
+// the server-decided expiry. Refresh at half the expiry; floor at 15s so a
+// hostile (1s expiry) server can't make us hammer the network.
+func refreshInterval(expires int) time.Duration {
+	if expires <= 0 {
+		return sipRegisterRefresh
+	}
+	d := time.Duration(expires) * time.Second / 2
+	if d < 15*time.Second {
+		return 15 * time.Second
+	}
+	if d > sipRegisterRefresh {
+		return sipRegisterRefresh
+	}
+	return d
+}
+
 // registerOnce performs a single REGISTER request, handling the digest
-// challenge with the existing helpers from digest.go.
-func (s *SIPServer) registerOnce(ctx context.Context, st StreamConfig) error {
-	target := sip.Uri{Scheme: "sip", Host: st.Host, Port: 5060}
+// challenge with the existing helpers from digest.go. Returns the Expires
+// value the server granted (which may be smaller than what we asked for
+// — Dahua firmware commonly clamps to 60s).
+func (s *SIPServer) registerOnce(ctx context.Context, st StreamConfig) (int, error) {
+	// Dahua's WWW-Authenticate carries uri="sip:<host>" (no port). The
+	// digest response's uri MUST match the request URI byte-for-byte, so
+	// we build the Request-URI without a port too.
+	target := sip.Uri{Scheme: "sip", Host: st.Host}
 	from := sip.Uri{Scheme: "sip", User: st.SIPExt, Host: st.Host}
 	contact := sip.Uri{Scheme: "sip", User: st.SIPExt, Host: s.contactHost, Port: s.contactPort}
 
@@ -249,13 +290,13 @@ func (s *SIPServer) registerOnce(ctx context.Context, st StreamConfig) error {
 
 	resp, err := s.do(reqCtx, build(""))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if resp.StatusCode == 200 {
-		return nil
+		return expiresFromResponse(resp), nil
 	}
 	if resp.StatusCode != 401 && resp.StatusCode != 407 {
-		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return 0, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
 	chalHeader := resp.GetHeader("WWW-Authenticate")
@@ -263,24 +304,40 @@ func (s *SIPServer) registerOnce(ctx context.Context, st StreamConfig) error {
 		chalHeader = resp.GetHeader("Proxy-Authenticate")
 	}
 	if chalHeader == nil {
-		return fmt.Errorf("status %d without auth challenge", resp.StatusCode)
+		return 0, fmt.Errorf("status %d without auth challenge", resp.StatusCode)
 	}
 	chal, err := parseDigestChallenge(chalHeader.Value())
 	if err != nil {
-		return fmt.Errorf("parse digest challenge: %w", err)
+		return 0, fmt.Errorf("parse digest challenge: %w", err)
 	}
 
-	uri := fmt.Sprintf("sip:%s:%d", st.Host, 5060)
+	// Match the Dahua-style Request-URI (no port) when computing the
+	// digest response — see comment on target above.
+	uri := fmt.Sprintf("sip:%s", st.Host)
 	auth := buildDigestResponse("REGISTER", uri, st.SIPExt, st.SIPPass, chal)
 
 	resp2, err := s.do(reqCtx, build(auth))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if resp2.StatusCode != 200 {
-		return fmt.Errorf("auth failed: status %d", resp2.StatusCode)
+		return 0, fmt.Errorf("auth failed: status %d", resp2.StatusCode)
 	}
-	return nil
+	return expiresFromResponse(resp2), nil
+}
+
+// expiresFromResponse pulls the Expires value from a 2xx REGISTER reply,
+// falling back to 0 (caller treats that as "use default refresh window").
+func expiresFromResponse(resp *sip.Response) int {
+	h := resp.GetHeader("Expires")
+	if h == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(h.Value()))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // do sends a request and returns the final response, terminating the

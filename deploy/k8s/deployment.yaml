@@ -52,10 +52,13 @@ spec:
               containerPort: 8080
             # SIP must be reachable from the cameras on the LAN so the VTO
             # can deliver INVITEs (bell presses). hostPort exposes the pod's
-            # UDP/5060 on the node's IP. Set the matching `sip.contact_host`
-            # in config.json to that node IP so the VTO routes back to us.
+            # UDP listener on the node's IP at port 5060. The pod itself
+            # listens on UDP/5160 (sip.bind=":5160" in config.json) — using
+            # a different containerPort avoids a kernel conntrack collision
+            # when sipgo reuses its listener socket for outbound REGISTERs.
+            # Cameras still talk to node IP : 5060 (sip.contact_port).
             - name: sip
-              containerPort: 5060
+              containerPort: 5160
               hostPort: 5060
               protocol: UDP
           securityContext:
