@@ -634,6 +634,20 @@ function stopWAPolling() {
   if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
 }
 
+async function unpairWA() {
+  if (!confirm('Unpair the current WhatsApp account and scan a new QR? Bell notifications will pause until pairing completes again.')) return;
+  try {
+    const res = await fetch('/wa/unpair', { method: 'POST' });
+    if (!res.ok) throw new Error('http ' + res.status);
+  } catch (err) {
+    alert('Re-pair failed: ' + err.message);
+    return;
+  }
+  // The server is now generating a fresh QR; resume polling so the panel
+  // shows it as soon as it's ready.
+  startWAPolling();
+}
+
 async function refreshWA() {
   let st;
   try {
@@ -655,7 +669,10 @@ async function refreshWA() {
   if (st.paired) {
     const jid = (st.jid || '').split(':')[0].split('@')[0];
     waStateEl.innerHTML = 'WhatsApp <span class="pill paired">paired</span>' +
-      (jid ? '<div style="color:#888;margin-top:4px;font-size:12px;">linked as +' + jid + '</div>' : '');
+      (jid ? '<div style="color:#888;margin-top:4px;font-size:12px;">linked as +' + jid + '</div>' : '') +
+      '<button id="wa-repair" style="margin-top:6px;font-size:11px;padding:3px 8px;">re-pair / change number</button>';
+    const repairBtn = document.getElementById('wa-repair');
+    if (repairBtn) repairBtn.addEventListener('click', unpairWA);
     waQRWrap.hidden = true;
     stopWAPolling();
   } else {

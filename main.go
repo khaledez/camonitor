@@ -31,6 +31,10 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"tailscale.com/tsnet"
+
+	// Embed Go's tzdata so time.LoadLocation works in the FROM-scratch
+	// image (which has no system zoneinfo).
+	_ "time/tzdata"
 )
 
 //go:embed web
@@ -95,6 +99,11 @@ type Config struct {
 	SIP      SIPConfig       `json:"sip"`
 	WhatsApp *WhatsAppConfig `json:"whatsapp,omitempty"`
 	Streams  []StreamConfig  `json:"streams"`
+	// Timezone names the IANA zone used when rendering wall-clock times
+	// for outbound notifications (e.g. the WhatsApp caption). The browser
+	// UI continues to use the viewer's local timezone via JS Date. Empty
+	// defaults to UTC. Examples: "Asia/Hebron", "Europe/Berlin".
+	Timezone string `json:"timezone,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -263,7 +272,15 @@ func main() {
 	snapFetch := func(c context.Context, s StreamConfig) ([]byte, error) {
 		return FetchSnapshot(c, snapClient, s)
 	}
-	bell := NewBellBus(cfg.Streams, snapFetch, waSend)
+	tz := time.UTC
+	if cfg.Timezone != "" {
+		loc, err := time.LoadLocation(cfg.Timezone)
+		if err != nil {
+			log.Fatalf("invalid timezone %q: %v", cfg.Timezone, err)
+		}
+		tz = loc
+	}
+	bell := NewBellBus(cfg.Streams, snapFetch, waSend, tz)
 
 	sipSrv, err := NewSIPServer(cfg.SIP, cfg.Streams, bell)
 	if err != nil {
@@ -304,6 +321,7 @@ func main() {
 	if waClient != nil {
 		mux.HandleFunc("/wa/status", waClient.HandleStatus)
 		mux.HandleFunc("/wa/qr.png", waClient.HandleQR)
+		mux.HandleFunc("/wa/unpair", waClient.HandleUnpair)
 	} else {
 		// Static "not configured" status so the web UI can render its
 		// WhatsApp panel without conditionally fetching.

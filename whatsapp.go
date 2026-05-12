@@ -314,6 +314,57 @@ func (w *WhatsAppClient) Close() {
 	}
 }
 
+// Repair unlinks the currently paired WhatsApp account and starts a fresh
+// pairing flow. After this returns successfully, the web UI will start
+// surfacing a new QR via /wa/qr.png; the user scans it from a (possibly
+// different) phone's WhatsApp → Linked Devices to relink. The recipient
+// list is unaffected — it's controlled by config.json.
+func (w *WhatsAppClient) Repair(ctx context.Context) error {
+	if w.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+	// Best-effort logout from WhatsApp's servers. If the network's flaky
+	// or we're already unpaired, fall through to the local cleanup so the
+	// QR refresh still happens.
+	if w.client.Store.ID != nil {
+		if err := w.client.Logout(ctx); err != nil {
+			log.Printf("whatsapp: logout error: %v (continuing)", err)
+			w.client.Disconnect()
+		}
+	}
+	w.ready.Store(false)
+	w.clearQR()
+
+	qrChan, err := w.client.GetQRChannel(context.Background())
+	if err != nil {
+		return fmt.Errorf("qr channel: %w", err)
+	}
+	if err := w.client.Connect(); err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	go w.watchQR(qrChan)
+	return nil
+}
+
+// HandleUnpair serves POST /wa/unpair. Triggers a re-pair flow; the
+// browser's existing /wa/status polling picks up the new QR within a
+// few seconds.
+func (w *WhatsAppClient) HandleUnpair(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := w.Repair(ctx); err != nil {
+		log.Printf("whatsapp: repair failed: %v", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("whatsapp: unpaired; awaiting fresh QR scan")
+	rw.WriteHeader(http.StatusNoContent)
+}
+
 // parseRecipient turns "+15551234567" (or "15551234567") into the matching
 // WhatsApp user JID. WhatsApp identifies users by their phone number in
 // international format with no '+' and no separators.

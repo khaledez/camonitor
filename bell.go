@@ -67,6 +67,10 @@ type BellBus struct {
 	streams   map[string]StreamConfig
 	fetchSnap snapshotFetcher
 	sendWA    whatsappSender // nil if WhatsApp is not configured
+	// tz is the IANA location used when rendering wall-clock times for
+	// outbound notifications (e.g. the WhatsApp caption). Defaults to
+	// time.UTC when the config omits the timezone field.
+	tz *time.Location
 
 	mu        sync.Mutex
 	lastFire  map[string]time.Time
@@ -84,7 +88,10 @@ type historyEntry struct {
 	jpeg  []byte // nil if snapshot failed
 }
 
-func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSender) *BellBus {
+func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSender, tz *time.Location) *BellBus {
+	if tz == nil {
+		tz = time.UTC
+	}
 	byID := make(map[string]StreamConfig, len(streams))
 	for _, s := range streams {
 		byID[s.ID] = s
@@ -93,6 +100,7 @@ func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSend
 		streams:   byID,
 		fetchSnap: fetch,
 		sendWA:    send,
+		tz:        tz,
 		lastFire:  make(map[string]time.Time),
 		history:   make([]historyEntry, 0, historyCap),
 		latest:    make(map[string]string),
@@ -156,7 +164,7 @@ func (b *BellBus) handle(s StreamConfig, t time.Time) {
 	b.broadcast(ev)
 
 	if b.sendWA != nil && len(jpeg) > 0 {
-		caption := fmt.Sprintf("🔔 %s — %s", displayName, t.Format("15:04:05"))
+		caption := fmt.Sprintf("🔔 %s — %s", displayName, t.In(b.tz).Format("15:04:05"))
 		waCtx, cancel := context.WithTimeout(context.Background(), whatsappTimeout)
 		defer cancel()
 		if err := b.sendWA(waCtx, jpeg, caption); err != nil {
