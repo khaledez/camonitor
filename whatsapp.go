@@ -68,7 +68,17 @@ func driverRegistered(name string) bool {
 type WhatsAppConfig struct {
 	Session    string   `json:"session"`
 	Recipients []string `json:"recipients"`
+	// IntroMessage is the text broadcast to every recipient on each
+	// successful pairing (initial scan and re-pair). Empty falls back to
+	// a default Arabic announcement, so the recipients know the new
+	// sender phone is the doorbell.
+	IntroMessage string `json:"intro_message,omitempty"`
 }
+
+// defaultIntroMessage is the announcement sent to every recipient on
+// each successful pairing. Plain-text Arabic: "Peace be upon you! From
+// now on, doorbell notifications will arrive from this number."
+const defaultIntroMessage = "السلام عليكم! من الآن فصاعداً، ستصلكم إشعارات جرس الباب من هذا الرقم 🔔"
 
 // WhatsAppClient wraps a whatsmeow client + the recipient JIDs we'll send
 // to. SendImage is safe to call before pairing completes — it returns an
@@ -77,6 +87,7 @@ type WhatsAppClient struct {
 	client        *whatsmeow.Client
 	rawRecipients []string // as configured, for display
 	recipients    []types.JID
+	introMessage  string
 	ready         atomic.Bool
 
 	mu     sync.Mutex
@@ -142,10 +153,15 @@ func NewWhatsAppClient(ctx context.Context, cfg WhatsAppConfig) (*WhatsAppClient
 	clientLog := waLog.Stdout("WA", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 
+	introMsg := cfg.IntroMessage
+	if introMsg == "" {
+		introMsg = defaultIntroMessage
+	}
 	wa := &WhatsAppClient{
 		client:        client,
 		rawRecipients: append([]string(nil), cfg.Recipients...),
 		recipients:    recipients,
+		introMessage:  introMsg,
 	}
 
 	if client.Store.ID == nil {
@@ -182,6 +198,10 @@ func (w *WhatsAppClient) watchQR(qrChan <-chan whatsmeow.QRChannelItem) {
 			log.Println("whatsapp: pairing successful")
 			w.clearQR()
 			w.ready.Store(true)
+			// Announce the (possibly new) sender to recipients. Done on
+			// a fresh goroutine so we can return from watchQR; the actual
+			// send is bounded by its own context timeout.
+			go w.sendIntro()
 			return
 		case "timeout":
 			log.Println("whatsapp: pairing timed out — restart camonitor to try again")
@@ -263,6 +283,26 @@ func (w *WhatsAppClient) HandleQR(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Cache-Control", "no-store")
 	rw.Header().Set("Content-Length", fmt.Sprintf("%d", len(png)))
 	_, _ = rw.Write(png)
+}
+
+// sendIntro broadcasts introMessage to every recipient. Called on every
+// successful pairing so the recipients know the (possibly new) sender
+// account is the doorbell. Errors are logged per recipient and do not
+// propagate; the bell pipeline keeps working even if one phone is offline.
+func (w *WhatsAppClient) sendIntro() {
+	if w.introMessage == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, to := range w.recipients {
+		msg := &waProto.Message{Conversation: proto.String(w.introMessage)}
+		if _, err := w.client.SendMessage(ctx, to, msg); err != nil {
+			log.Printf("whatsapp: intro send to +%s failed: %v", to.User, err)
+			continue
+		}
+		log.Printf("whatsapp: intro sent to +%s", to.User)
+	}
 }
 
 // SendImage uploads the JPEG once and sends it (with caption) to every
