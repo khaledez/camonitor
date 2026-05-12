@@ -20,6 +20,19 @@ spec:
       labels:
         app: monitor
     spec:
+      # The pod shares the node's network namespace. Why:
+      #   - SIP REGISTER/INVITE must travel UDP/5060 to/from the cameras
+      #     on the LAN. Kubernetes pod networking (Flannel here) reliably
+      #     SNATs TCP egress to the LAN but loses the UDP return path,
+      #     so pod-to-LAN UDP silently dropped REGISTER replies. Living
+      #     directly on the host fixes that.
+      #   - tsnet runs entirely in userspace (it builds its own virtual
+      #     interface from quic-go-style WireGuard packets), so it is
+      #     unaffected by host networking.
+      #   - The HTTP listener moves to node:8080 — fine in this homelab
+      #     setup; nothing else binds 8080 on zima.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       # Satisfies the cluster's "restricted" PodSecurity profile.
       securityContext:
         runAsNonRoot: true
@@ -50,16 +63,10 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-            # SIP must be reachable from the cameras on the LAN so the VTO
-            # can deliver INVITEs (bell presses). hostPort exposes the pod's
-            # UDP listener on the node's IP at port 5060. The pod itself
-            # listens on UDP/5160 (sip.bind=":5160" in config.json) — using
-            # a different containerPort avoids a kernel conntrack collision
-            # when sipgo reuses its listener socket for outbound REGISTERs.
-            # Cameras still talk to node IP : 5060 (sip.contact_port).
+            # SIP listens on the host's UDP/5060 directly (hostNetwork
+            # above), so cameras on the LAN can reach it via the node IP.
             - name: sip
-              containerPort: 5160
-              hostPort: 5060
+              containerPort: 5060
               protocol: UDP
           securityContext:
             allowPrivilegeEscalation: false
