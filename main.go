@@ -279,6 +279,14 @@ func main() {
 		log.Printf("sip: not configured (no stream has sip_ext)")
 	}
 
+	// Dahua's HTTP event-stream is the reliable bell trigger on every
+	// VTO firmware we've tested — unlike the SIP path which depends on
+	// IsMainVTO/registration topology. Run it unconditionally for every
+	// stream alongside the SIP UA above; both feed the same BellBus and
+	// share its per-stream debounce, so duplicate triggers are harmless.
+	events := NewEventAttachClient(cfg.Streams, bell)
+	go events.Run(ctx)
+
 	staticFS, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatalf("embed: %v", err)
