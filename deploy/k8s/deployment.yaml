@@ -43,7 +43,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: monitor
-          image: ghcr.io/khaledez/camonitor:0.5.2
+          image: ghcr.io/khaledez/camonitor:0.6.0
           args:
             - -config
             - /etc/camonitor/config.json
