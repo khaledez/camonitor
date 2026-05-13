@@ -71,6 +71,9 @@ type BellBus struct {
 	// outbound notifications (e.g. the WhatsApp caption). Defaults to
 	// time.UTC when the config omits the timezone field.
 	tz *time.Location
+	// store persists ring history so a pod restart / deploy doesn't lose
+	// recent events + snapshots. nil means in-memory only.
+	store *BellStore
 
 	mu        sync.Mutex
 	lastFire  map[string]time.Time
@@ -88,7 +91,7 @@ type historyEntry struct {
 	jpeg  []byte // nil if snapshot failed
 }
 
-func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSender, tz *time.Location) *BellBus {
+func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSender, tz *time.Location, store *BellStore) *BellBus {
 	if tz == nil {
 		tz = time.UTC
 	}
@@ -96,16 +99,31 @@ func NewBellBus(streams []StreamConfig, fetch snapshotFetcher, send whatsappSend
 	for _, s := range streams {
 		byID[s.ID] = s
 	}
-	return &BellBus{
+	b := &BellBus{
 		streams:   byID,
 		fetchSnap: fetch,
 		sendWA:    send,
 		tz:        tz,
+		store:     store,
 		lastFire:  make(map[string]time.Time),
 		history:   make([]historyEntry, 0, historyCap),
 		latest:    make(map[string]string),
 		subs:      make(map[chan BellEvent]struct{}),
 	}
+	// Replay the persisted history into the in-memory ring buffer so the
+	// /rings endpoint and the side-panel "history" list survive deploys.
+	if entries, err := store.LoadRecent(historyCap); err != nil {
+		log.Printf("bell: load history failed: %v (continuing with empty history)", err)
+	} else {
+		for _, e := range entries {
+			b.history = append(b.history, historyEntry{event: e.Event, jpeg: e.JPEG})
+			b.latest[e.Event.StreamID] = e.Event.EventID
+		}
+		if len(entries) > 0 {
+			log.Printf("bell: replayed %d history entries from store", len(entries))
+		}
+	}
+	return b
 }
 
 // Fire is called by the SIP handler when an INVITE arrives. It is
@@ -161,6 +179,11 @@ func (b *BellBus) handle(s StreamConfig, t time.Time) {
 		HasSnapshot: len(jpeg) > 0,
 	}
 	b.appendHistory(historyEntry{event: ev, jpeg: jpeg})
+	if err := b.store.Save(ev, jpeg); err != nil {
+		log.Printf("bell [%s]: persist failed: %v", s.ID, err)
+	} else if err := b.store.Prune(historyCap); err != nil {
+		log.Printf("bell [%s]: prune failed: %v", s.ID, err)
+	}
 	b.broadcast(ev)
 
 	if b.sendWA != nil && len(jpeg) > 0 {

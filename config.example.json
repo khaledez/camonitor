@@ -1,6 +1,7 @@
 {
   "listen": ":8080",
   "timezone": "Europe/Berlin",
+  "bell_history_db": "/var/lib/camonitor/bell.db",
   "sip": {
     "bind": ":5060",
     "contact_host": ""

@@ -104,6 +104,11 @@ type Config struct {
 	// UI continues to use the viewer's local timezone via JS Date. Empty
 	// defaults to UTC. Examples: "Asia/Hebron", "Europe/Berlin".
 	Timezone string `json:"timezone,omitempty"`
+	// BellHistoryDB is the path to a SQLite file used to persist the
+	// ring history (events + snapshots) across pod restarts. Empty keeps
+	// the existing in-memory-only behaviour. Recommended location is
+	// the same PVC that holds the WhatsApp session.
+	BellHistoryDB string `json:"bell_history_db,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -280,7 +285,20 @@ func main() {
 		}
 		tz = loc
 	}
-	bell := NewBellBus(cfg.Streams, snapFetch, waSend, tz)
+	// Optional persistent history. A failure to open the store is logged
+	// but not fatal — the rest of the system works fine in-memory.
+	var bellStore *BellStore
+	if cfg.BellHistoryDB != "" {
+		s, err := OpenBellStore(cfg.BellHistoryDB)
+		if err != nil {
+			log.Printf("bell history: open %q failed: %v (running in-memory only)",
+				cfg.BellHistoryDB, err)
+		} else {
+			bellStore = s
+			defer bellStore.Close()
+		}
+	}
+	bell := NewBellBus(cfg.Streams, snapFetch, waSend, tz, bellStore)
 
 	sipSrv, err := NewSIPServer(cfg.SIP, cfg.Streams, bell)
 	if err != nil {
