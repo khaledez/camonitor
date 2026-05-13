@@ -315,25 +315,18 @@ func (w *WhatsAppClient) sendIntro() {
 	if client == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// whatsmeow's QR "success" event fires before the websocket has
 	// reconnected as the newly paired device, so an immediate SendMessage
-	// fails with "websocket not connected". Poll briefly for the client
-	// to be both connected (TCP) and logged in (LOGIN exchange done).
-	const readyDeadline = 30 * time.Second
-	deadline := time.Now().Add(readyDeadline)
-	for time.Now().Before(deadline) {
-		if client.IsConnected() && client.IsLoggedIn() {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !client.IsConnected() || !client.IsLoggedIn() {
-		log.Printf("whatsapp: intro skipped — client not connected within %s", readyDeadline)
+	// hits "websocket not connected". Block until the client is both
+	// connected (TCP) and logged in (LOGIN exchange done), or ctx expires.
+	if err := waitClientReady(ctx, client); err != nil {
+		log.Printf("whatsapp: intro skipped: %v", err)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	for _, to := range w.recipients {
 		msg := &waProto.Message{Conversation: proto.String(w.introMessage)}
 		if _, err := client.SendMessage(ctx, to, msg); err != nil {
@@ -341,6 +334,28 @@ func (w *WhatsAppClient) sendIntro() {
 			continue
 		}
 		log.Printf("whatsapp: intro sent to +%s", to.User)
+	}
+}
+
+// waitClientReady blocks until the whatsmeow client is connected AND
+// logged in, or ctx is cancelled. Returns ctx.Err() on timeout. Uses a
+// small polling interval because whatsmeow doesn't expose a single
+// "ready" channel/event covering both states.
+func waitClientReady(ctx context.Context, c *whatsmeow.Client) error {
+	if c.IsConnected() && c.IsLoggedIn() {
+		return nil
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if c.IsConnected() && c.IsLoggedIn() {
+				return nil
+			}
+		}
 	}
 }
 
