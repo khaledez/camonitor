@@ -84,16 +84,31 @@ const defaultIntroMessage = "السلام عليكم! من الآن فصاعدا
 // to. SendImage is safe to call before pairing completes — it returns an
 // error explaining that the user needs to scan the QR.
 type WhatsAppClient struct {
-	client        *whatsmeow.Client
+	// container outlives any specific whatsmeow.Client; re-pair creates
+	// a fresh Device from this container after the previous device is
+	// logged out (whatsmeow marks the old Device as "deleted" and won't
+	// let it be reused).
+	container     *sqlstore.Container
 	rawRecipients []string // as configured, for display
 	recipients    []types.JID
 	introMessage  string
+	clientLog     waLog.Logger
 	ready         atomic.Bool
 
 	mu     sync.Mutex
-	qrCode string    // empty once paired; populated on each rotation
-	qrAt   time.Time // when the current QR was issued
-	qrPNG  []byte    // pre-rendered PNG of qrCode, regenerated on rotation
+	client *whatsmeow.Client // replaced on Repair; always non-nil after construction
+	qrCode string            // empty once paired; populated on each rotation
+	qrAt   time.Time         // when the current QR was issued
+	qrPNG  []byte            // pre-rendered PNG of qrCode, regenerated on rotation
+}
+
+// currentClient returns the live whatsmeow client under mu. Use this
+// instead of touching w.client directly: Repair replaces the pointer
+// when re-pairing.
+func (w *WhatsAppClient) currentClient() *whatsmeow.Client {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.client
 }
 
 // WhatsAppStatus is the JSON returned by GET /wa/status.
@@ -158,7 +173,9 @@ func NewWhatsAppClient(ctx context.Context, cfg WhatsAppConfig) (*WhatsAppClient
 		introMsg = defaultIntroMessage
 	}
 	wa := &WhatsAppClient{
+		container:     container,
 		client:        client,
+		clientLog:     clientLog,
 		rawRecipients: append([]string(nil), cfg.Recipients...),
 		recipients:    recipients,
 		introMessage:  introMsg,
@@ -255,7 +272,8 @@ func (w *WhatsAppClient) Status() WhatsAppStatus {
 		HasQR:      len(w.qrPNG) > 0,
 		QRIssuedAt: w.qrAt,
 	}
-	if w.client.Store.ID != nil {
+	// w.client is also protected by w.mu.
+	if w.client != nil && w.client.Store.ID != nil {
 		st.JID = w.client.Store.ID.String()
 	}
 	return st
@@ -293,11 +311,15 @@ func (w *WhatsAppClient) sendIntro() {
 	if w.introMessage == "" {
 		return
 	}
+	client := w.currentClient()
+	if client == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, to := range w.recipients {
 		msg := &waProto.Message{Conversation: proto.String(w.introMessage)}
-		if _, err := w.client.SendMessage(ctx, to, msg); err != nil {
+		if _, err := client.SendMessage(ctx, to, msg); err != nil {
 			log.Printf("whatsapp: intro send to +%s failed: %v", to.User, err)
 			continue
 		}
@@ -315,8 +337,12 @@ func (w *WhatsAppClient) SendImage(ctx context.Context, jpeg []byte, caption str
 	if len(jpeg) == 0 {
 		return errors.New("empty image")
 	}
+	client := w.currentClient()
+	if client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
 
-	uploaded, err := w.client.Upload(ctx, jpeg, whatsmeow.MediaImage)
+	uploaded, err := client.Upload(ctx, jpeg, whatsmeow.MediaImage)
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
@@ -336,7 +362,7 @@ func (w *WhatsAppClient) SendImage(ctx context.Context, jpeg []byte, caption str
 
 	var errs []string
 	for _, to := range w.recipients {
-		if _, err := w.client.SendMessage(ctx, to, msg); err != nil {
+		if _, err := client.SendMessage(ctx, to, msg); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", to.User, err))
 		}
 	}
@@ -349,8 +375,8 @@ func (w *WhatsAppClient) SendImage(ctx context.Context, jpeg []byte, caption str
 // Close disconnects the whatsmeow client. The session DB stays on disk so
 // the next run can resume without re-pairing.
 func (w *WhatsAppClient) Close() {
-	if w.client != nil {
-		w.client.Disconnect()
+	if c := w.currentClient(); c != nil {
+		c.Disconnect()
 	}
 }
 
@@ -359,29 +385,49 @@ func (w *WhatsAppClient) Close() {
 // surfacing a new QR via /wa/qr.png; the user scans it from a (possibly
 // different) phone's WhatsApp → Linked Devices to relink. The recipient
 // list is unaffected — it's controlled by config.json.
+//
+// Implementation note: whatsmeow's Logout marks the underlying Device as
+// "deleted" and refuses to reuse it for a subsequent Connect. So we
+// allocate a fresh Device on the same SQL container and swap the active
+// client pointer under mu; concurrent readers (SendImage, HandleStatus)
+// fetch the live client via currentClient().
 func (w *WhatsAppClient) Repair(ctx context.Context) error {
-	if w.client == nil {
+	old := w.currentClient()
+	if old == nil {
 		return errors.New("whatsapp client not initialized")
 	}
-	// Best-effort logout from WhatsApp's servers. If the network's flaky
-	// or we're already unpaired, fall through to the local cleanup so the
-	// QR refresh still happens.
-	if w.client.Store.ID != nil {
-		if err := w.client.Logout(ctx); err != nil {
+
+	// Best-effort server-side logout. If the network's flaky or we're
+	// already unpaired, fall through to local cleanup so the QR refresh
+	// still happens.
+	if old.Store.ID != nil {
+		if err := old.Logout(ctx); err != nil {
 			log.Printf("whatsapp: logout error: %v (continuing)", err)
-			w.client.Disconnect()
+			old.Disconnect()
 		}
+	} else {
+		old.Disconnect()
 	}
 	w.ready.Store(false)
 	w.clearQR()
 
-	qrChan, err := w.client.GetQRChannel(context.Background())
+	// Fresh Device from the same container. NewDevice is in-memory until
+	// the first pairing-success write hits the SQL store.
+	newDevice := w.container.NewDevice()
+	newClient := whatsmeow.NewClient(newDevice, w.clientLog)
+
+	qrChan, err := newClient.GetQRChannel(context.Background())
 	if err != nil {
 		return fmt.Errorf("qr channel: %w", err)
 	}
-	if err := w.client.Connect(); err != nil {
+	if err := newClient.Connect(); err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+
+	w.mu.Lock()
+	w.client = newClient
+	w.mu.Unlock()
+
 	go w.watchQR(qrChan)
 	return nil
 }
