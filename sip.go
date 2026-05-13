@@ -53,10 +53,10 @@ type SIPConfig struct {
 }
 
 type SIPServer struct {
-	cfg       SIPConfig
-	streams   []StreamConfig
+	cfg           SIPConfig
+	streams       []StreamConfig
 	streamsByHost map[string]string // VTO IP → stream ID
-	bell      *BellBus
+	bell          *BellBus
 
 	contactHost string
 	contactPort int
@@ -159,11 +159,9 @@ func (s *SIPServer) Run(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	for _, st := range s.streams {
-		wg.Add(1)
-		go func(st StreamConfig) {
-			defer wg.Done()
+		wg.Go(func() {
 			s.registerLoop(ctx, st)
-		}(st)
+		})
 	}
 
 	select {

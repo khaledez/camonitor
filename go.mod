@@ -15,8 +15,8 @@ require (
 	github.com/emiago/sipgo v1.3.1
 	github.com/mdp/qrterminal/v3 v3.2.1
 	go.mau.fi/whatsmeow v0.0.0-20260506122147-6a7198d94d26
-	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.50.0
+	rsc.io/qr v0.2.0
 	tailscale.com v1.98.0
 )
 
@@ -108,9 +108,9 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

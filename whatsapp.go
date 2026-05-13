@@ -26,6 +26,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"google.golang.org/protobuf/proto"
 	"rsc.io/qr"
 
 	// Pure-Go SQLite driver; the alias-import below re-registers it as
@@ -58,12 +58,7 @@ func init() {
 }
 
 func driverRegistered(name string) bool {
-	for _, n := range sql.Drivers() {
-		if n == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(sql.Drivers(), name)
 }
 
 type WhatsAppConfig struct {
@@ -114,12 +109,12 @@ func (w *WhatsAppClient) currentClient() *whatsmeow.Client {
 
 // WhatsAppStatus is the JSON returned by GET /wa/status.
 type WhatsAppStatus struct {
-	Configured  bool      `json:"configured"`
-	Paired      bool      `json:"paired"`
-	JID         string    `json:"jid,omitempty"`
-	Recipients  []string  `json:"recipients"`
-	HasQR       bool      `json:"hasQR"`
-	QRIssuedAt  time.Time `json:"qrIssuedAt,omitempty"`
+	Configured bool      `json:"configured"`
+	Paired     bool      `json:"paired"`
+	JID        string    `json:"jid,omitempty"`
+	Recipients []string  `json:"recipients"`
+	HasQR      bool      `json:"hasQR"`
+	QRIssuedAt time.Time `json:"qrIssuedAt"`
 }
 
 // NewWhatsAppClient opens (or creates) the session DB, builds a whatsmeow
@@ -337,7 +332,7 @@ func (w *WhatsAppClient) sendIntro() {
 	}
 
 	for _, to := range w.recipients {
-		msg := &waProto.Message{Conversation: proto.String(w.introMessage)}
+		msg := &waProto.Message{Conversation: new(w.introMessage)}
 		if _, err := client.SendMessage(ctx, to, msg); err != nil {
 			log.Printf("whatsapp: intro send to +%s failed: %v", to.User, err)
 			continue
@@ -422,14 +417,14 @@ func (w *WhatsAppClient) SendImage(ctx context.Context, jpeg []byte, caption str
 
 	msg := &waProto.Message{
 		ImageMessage: &waProto.ImageMessage{
-			Caption:       proto.String(caption),
-			Mimetype:      proto.String("image/jpeg"),
-			URL:           proto.String(uploaded.URL),
-			DirectPath:    proto.String(uploaded.DirectPath),
+			Caption:       new(caption),
+			Mimetype:      new("image/jpeg"),
+			URL:           new(uploaded.URL),
+			DirectPath:    new(uploaded.DirectPath),
 			MediaKey:      uploaded.MediaKey,
 			FileEncSHA256: uploaded.FileEncSHA256,
 			FileSHA256:    uploaded.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(jpeg))),
+			FileLength:    new(uint64(len(jpeg))),
 		},
 	}
 

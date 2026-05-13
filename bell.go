@@ -75,11 +75,11 @@ type BellBus struct {
 	// recent events + snapshots. nil means in-memory only.
 	store *BellStore
 
-	mu        sync.Mutex
-	lastFire  map[string]time.Time
-	history   []historyEntry // ring buffer, append-only with head trimmed
-	latest    map[string]string // streamID → most recent eventID for that stream
-	subs      map[chan BellEvent]struct{}
+	mu       sync.Mutex
+	lastFire map[string]time.Time
+	history  []historyEntry    // ring buffer, append-only with head trimmed
+	latest   map[string]string // streamID → most recent eventID for that stream
+	subs     map[chan BellEvent]struct{}
 
 	// nextSeq monotonic counter used to build event IDs. Atomic so we can
 	// read it without locking when generating an ID before taking the mu.

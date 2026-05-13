@@ -366,24 +366,20 @@ func main() {
 	serverErr := make(chan error, 2)
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		log.Printf("camonitor HTTP listening on %s with %d stream(s)", cfg.Listen, len(cfg.Streams))
 		if err := plainSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- fmt.Errorf("plain http: %w", err)
 		}
-	}()
+	})
 
 	if tsListener != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			log.Printf("camonitor HTTPS listening on %s.<tailnet>.ts.net", *tsHostname)
 			if err := tsSrv.Serve(tsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serverErr <- fmt.Errorf("tsnet http: %w", err)
 			}
-		}()
+		})
 	}
 
 	sig := make(chan os.Signal, 1)

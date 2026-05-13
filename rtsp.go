@@ -29,6 +29,7 @@ import (
 	"maps"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -574,10 +575,8 @@ func findMedia(sdp, baseURI string) (video rtspMedia, audio *rtspMedia, err erro
 	pick := func(m *rawMedia, want ...string) string {
 		for _, pt := range m.pts {
 			c := m.codecs[pt]
-			for _, w := range want {
-				if c == w {
-					return c
-				}
+			if slices.Contains(want, c) {
+				return c
 			}
 		}
 		return ""

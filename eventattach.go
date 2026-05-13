@@ -74,11 +74,9 @@ func (e *EventAttachClient) Run(ctx context.Context) {
 	}
 	var wg sync.WaitGroup
 	for _, s := range e.streams {
-		wg.Add(1)
-		go func(s StreamConfig) {
-			defer wg.Done()
+		wg.Go(func() {
 			e.subscribeLoop(ctx, s)
-		}(s)
+		})
 	}
 	wg.Wait()
 }
