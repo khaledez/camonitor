@@ -315,6 +315,23 @@ func (w *WhatsAppClient) sendIntro() {
 	if client == nil {
 		return
 	}
+	// whatsmeow's QR "success" event fires before the websocket has
+	// reconnected as the newly paired device, so an immediate SendMessage
+	// fails with "websocket not connected". Poll briefly for the client
+	// to be both connected (TCP) and logged in (LOGIN exchange done).
+	const readyDeadline = 30 * time.Second
+	deadline := time.Now().Add(readyDeadline)
+	for time.Now().Before(deadline) {
+		if client.IsConnected() && client.IsLoggedIn() {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !client.IsConnected() || !client.IsLoggedIn() {
+		log.Printf("whatsapp: intro skipped — client not connected within %s", readyDeadline)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, to := range w.recipients {
