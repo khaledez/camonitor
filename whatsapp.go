@@ -36,6 +36,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 	"rsc.io/qr"
@@ -315,16 +316,24 @@ func (w *WhatsAppClient) sendIntro() {
 	if client == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// whatsmeow's QR "success" event fires before the websocket has
-	// reconnected as the newly paired device, so an immediate SendMessage
-	// hits "websocket not connected". Block until the client is both
-	// connected (TCP) and logged in (LOGIN exchange done), or ctx expires.
+	// whatsmeow's QR "success" fires before the websocket has reconnected
+	// as the newly paired device — wait for the TCP + LOGIN to land first.
 	if err := waitClientReady(ctx, client); err != nil {
 		log.Printf("whatsapp: intro skipped: %v", err)
 		return
+	}
+	// IsLoggedIn alone is not enough: whatsmeow still has to fetch the
+	// recipients' device lists and establish per-device Signal sessions
+	// before encryption succeeds. Sending too soon makes the first send
+	// drop the recipient's primary phone (":0" device) with a
+	// "no signal session established" warning, so the message never lands
+	// on the actual phone. AppStateSyncComplete fires after the post-
+	// pairing app-state pull and is a reliable "now I can encrypt" gate.
+	if err := waitAppStateSync(ctx, client, 15*time.Second); err != nil {
+		log.Printf("whatsapp: app-state sync wait: %v (sending intro anyway)", err)
 	}
 
 	for _, to := range w.recipients {
@@ -334,6 +343,38 @@ func (w *WhatsAppClient) sendIntro() {
 			continue
 		}
 		log.Printf("whatsapp: intro sent to +%s", to.User)
+	}
+}
+
+// waitAppStateSync blocks until whatsmeow emits its first
+// AppStateSyncComplete event, ctx expires, or the optional fallback
+// duration elapses (whichever comes first). The fallback exists so a
+// re-pair onto an already-warm session (no app-state sync triggered)
+// still proceeds to send rather than hanging until ctx times out.
+// Returns nil only when the event arrived in time.
+func waitAppStateSync(ctx context.Context, c *whatsmeow.Client, fallback time.Duration) error {
+	synced := make(chan struct{})
+	var once sync.Once
+	handlerID := c.AddEventHandler(func(evt any) {
+		if _, ok := evt.(*events.AppStateSyncComplete); ok {
+			once.Do(func() { close(synced) })
+		}
+	})
+	defer c.RemoveEventHandler(handlerID)
+
+	var fallbackCh <-chan time.Time
+	if fallback > 0 {
+		t := time.NewTimer(fallback)
+		defer t.Stop()
+		fallbackCh = t.C
+	}
+	select {
+	case <-synced:
+		return nil
+	case <-fallbackCh:
+		return fmt.Errorf("AppStateSyncComplete not received within %s", fallback)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
