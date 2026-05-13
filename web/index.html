@@ -624,14 +624,24 @@ function clearUnread() {
   sideToggle.classList.remove('has-unread');
 }
 
+// WhatsApp polling cadence is adaptive: fast (1.5s) while we're unpaired
+// and still waiting for whatsmeow to issue the first QR after a re-pair,
+// slow (5s) once the QR is on screen (the code itself rotates ~every 20s,
+// no need to outpace that), and off when paired or not configured.
 let waPollTimer = null;
+let waPollInterval = 0;
+function setWAPollInterval(ms) {
+  if (ms === waPollInterval) return;
+  if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+  if (ms > 0) waPollTimer = setInterval(refreshWA, ms);
+  waPollInterval = ms;
+}
 function startWAPolling() {
-  if (waPollTimer) return;
-  refreshWA(); // immediate
-  waPollTimer = setInterval(refreshWA, 5000);
+  if (!waPollInterval) setWAPollInterval(5000);
+  refreshWA();
 }
 function stopWAPolling() {
-  if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+  setWAPollInterval(0);
 }
 
 async function unpairWA() {
@@ -663,10 +673,7 @@ async function refreshWA() {
       '</div>';
     waQRWrap.hidden = true;
     waRecipients.innerHTML = '';
-    stopWAPolling();
-    return;
-  }
-  if (st.paired) {
+  } else if (st.paired) {
     const jid = (st.jid || '').split(':')[0].split('@')[0];
     waStateEl.innerHTML = 'WhatsApp <span class="pill paired">paired</span>' +
       (jid ? '<div style="color:#888;margin-top:4px;font-size:12px;">linked as +' + jid + '</div>' : '') +
@@ -674,7 +681,6 @@ async function refreshWA() {
     const repairBtn = document.getElementById('wa-repair');
     if (repairBtn) repairBtn.addEventListener('click', unpairWA);
     waQRWrap.hidden = true;
-    stopWAPolling();
   } else {
     waStateEl.innerHTML = 'WhatsApp <span class="pill unpaired">waiting for QR scan</span>';
     if (st.hasQR) {
@@ -685,12 +691,20 @@ async function refreshWA() {
       waQRWrap.hidden = true;
     }
   }
-  waRecipients.innerHTML = '';
-  for (const num of (st.recipients || [])) {
-    const li = document.createElement('li');
-    li.textContent = num;
-    waRecipients.appendChild(li);
+  if (st.configured) {
+    waRecipients.innerHTML = '';
+    for (const num of (st.recipients || [])) {
+      const li = document.createElement('li');
+      li.textContent = num;
+      waRecipients.appendChild(li);
+    }
   }
+  // Decide the next poll cadence based on what we just observed: stop
+  // when paired or not-configured, fast while waiting for the QR to be
+  // issued, slow once it's shown.
+  let nextMs = 0;
+  if (st.configured && !st.paired) nextMs = st.hasQR ? 5000 : 1500;
+  setWAPollInterval(nextMs);
 }
 
 function fmtTime(iso) {
