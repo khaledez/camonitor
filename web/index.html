@@ -658,6 +658,20 @@ async function unpairWA() {
   startWAPolling();
 }
 
+// relinkWA triggers a fresh pairing flow when the device is already unpaired.
+// Unlike unpairWA it skips the confirmation prompt — there's no linked account
+// to lose, so relinking is purely additive.
+async function relinkWA() {
+  try {
+    const res = await fetch('/wa/unpair', { method: 'POST' });
+    if (!res.ok) throw new Error('http ' + res.status);
+  } catch (err) {
+    alert('Could not start pairing: ' + err.message);
+    return;
+  }
+  startWAPolling();
+}
+
 async function refreshWA() {
   let st;
   try {
@@ -681,15 +695,25 @@ async function refreshWA() {
     const repairBtn = document.getElementById('wa-repair');
     if (repairBtn) repairBtn.addEventListener('click', unpairWA);
     waQRWrap.hidden = true;
+  } else if (st.hasQR) {
+    waStateEl.innerHTML = 'WhatsApp <span class="pill unpaired">scan the QR to link</span>';
+    // Cache-bust on every poll so a rotated QR shows up.
+    waQRImg.src = '/wa/qr.png?t=' + Date.now();
+    waQRWrap.hidden = false;
   } else {
-    waStateEl.innerHTML = 'WhatsApp <span class="pill unpaired">waiting for QR scan</span>';
-    if (st.hasQR) {
-      // Cache-bust on every poll so a rotated QR shows up.
-      waQRImg.src = '/wa/qr.png?t=' + Date.now();
-      waQRWrap.hidden = false;
-    } else {
-      waQRWrap.hidden = true;
-    }
+    // Unpaired with no QR being issued: the linked device was logged out
+    // (e.g. WhatsApp dropped the link after an outage) and nothing is pairing
+    // right now. "waiting for QR scan" here would be a lie — there's nothing
+    // to scan. Say so plainly and offer a one-click way to generate a fresh
+    // pairing code.
+    waStateEl.innerHTML = 'WhatsApp <span class="pill unpaired">not linked</span>' +
+      '<div style="color:#888;margin-top:6px;font-size:12px;">' +
+      'The linked device was logged out. Generate a new pairing code to relink.' +
+      '</div>' +
+      '<button id="wa-relink" style="margin-top:6px;font-size:11px;padding:3px 8px;">generate pairing QR</button>';
+    const relinkBtn = document.getElementById('wa-relink');
+    if (relinkBtn) relinkBtn.addEventListener('click', relinkWA);
+    waQRWrap.hidden = true;
   }
   if (st.configured) {
     waRecipients.innerHTML = '';
