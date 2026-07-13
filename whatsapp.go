@@ -176,6 +176,7 @@ func NewWhatsAppClient(ctx context.Context, cfg WhatsAppConfig) (*WhatsAppClient
 		recipients:    recipients,
 		introMessage:  introMsg,
 	}
+	wa.watchLogout(client)
 
 	if client.Store.ID == nil {
 		// First boot — pair via QR. Connect first so whatsmeow generates
@@ -224,6 +225,36 @@ func (w *WhatsAppClient) watchQR(qrChan <-chan whatsmeow.QRChannelItem) {
 			log.Printf("whatsapp: pairing event %q", evt.Event)
 		}
 	}
+}
+
+// watchLogout auto-recovers from a server-side logout. WhatsApp can unlink a
+// device after a long offline stretch (a power outage is the usual culprit);
+// whatsmeow then deletes the stored identity and fires *events.LoggedOut,
+// leaving us unpaired. Without this handler nothing reacts: status keeps
+// reporting "paired" until the next restart, which then falls into a QR flow
+// no one is watching. Here we flip to unpaired immediately and kick off a
+// fresh pairing so the web UI can surface a new QR right away.
+//
+// Registered on every client we build (initial one and each Repair swap), so
+// a second logout later is handled the same way.
+func (w *WhatsAppClient) watchLogout(c *whatsmeow.Client) {
+	c.AddEventHandler(func(evt any) {
+		if _, ok := evt.(*events.LoggedOut); !ok {
+			return
+		}
+		log.Println("whatsapp: server logged us out; starting a fresh pairing")
+		w.ready.Store(false)
+		w.clearQR()
+		// Repair disconnects this now-defunct client and swaps in a fresh one
+		// with its own QR channel. Run it off the event goroutine so we don't
+		// block whatsmeow's dispatcher or re-enter the client that's still
+		// delivering this event.
+		go func() {
+			if err := w.Repair(context.Background()); err != nil {
+				log.Printf("whatsapp: auto re-pair after logout failed: %v", err)
+			}
+		}()
+	})
 }
 
 func (w *WhatsAppClient) setQR(code string) {
@@ -483,6 +514,7 @@ func (w *WhatsAppClient) Repair(ctx context.Context) error {
 	// the first pairing-success write hits the SQL store.
 	newDevice := w.container.NewDevice()
 	newClient := whatsmeow.NewClient(newDevice, w.clientLog)
+	w.watchLogout(newClient)
 
 	qrChan, err := newClient.GetQRChannel(context.Background())
 	if err != nil {
