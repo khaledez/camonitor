@@ -27,6 +27,11 @@
     display: grid; gap: 6px; padding: 6px;
     grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   }
+  /* Cap the camera wall at 2 columns on desktop so tiles stay large
+     instead of squeezing 4+ cameras into a single row. */
+  @media (min-width: 900px) {
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   .cell {
     position: relative; background: #000; border: 1px solid #2a2a2e;
     border-radius: 4px; overflow: hidden; aspect-ratio: 16 / 9;
