@@ -139,8 +139,8 @@ func streamOnce(ctx context.Context, s StreamConfig, subtype int, targets stream
 	}
 
 	hasAudio := rc.audioControlURL != ""
-	log.Printf("[%s] connected to %s; H.264 video%s",
-		s.ID, redact(u),
+	log.Printf("[%s] connected to %s; %s video%s",
+		s.ID, redact(u), rc.videoCodec,
 		map[bool]string{true: " + audio", false: ""}[hasAudio])
 
 	// Fire-and-forget keepalive ticker. The OPTIONS response comes back
@@ -200,6 +200,10 @@ type rtspConn struct {
 	// invoke targets.audioWriter on chanAudioRTP frames.
 	audioControlURL string
 
+	// videoCodec is the codec name ("H264" or "H265") of the video media
+	// we SETUP'd, for logging.
+	videoCodec string
+
 	// readBuf is reused across every interleaved frame on this connection.
 	// 64 KiB matches the maximum length expressible in the 16-bit length
 	// field; in practice frames are MTU-bounded and far smaller. Per-conn
@@ -248,6 +252,7 @@ func (rc *rtspConn) handshake() error {
 	if err != nil {
 		return fmt.Errorf("SDP: %w", err)
 	}
+	rc.videoCodec = video.codec
 
 	setup, err := rc.do("SETUP", video.controlURL, map[string]string{
 		"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", chanVideoRTP, chanVideoRTCP),
@@ -589,15 +594,16 @@ func findMedia(sdp, baseURI string) (video rtspMedia, audio *rtspMedia, err erro
 			if foundVideo {
 				continue
 			}
-			if pick(m, "H264") == "" {
+			codec := pick(m, "H264", "H265")
+			if codec == "" {
 				continue
 			}
 			if m.control == "" {
-				return video, nil, errors.New("H.264 media has no a=control attribute")
+				return video, nil, errors.New("video media has no a=control attribute")
 			}
 			video = rtspMedia{
 				kind:       "video",
-				codec:      "H264",
+				codec:      codec,
 				controlURL: resolveControl(baseURI, m.control),
 			}
 			foundVideo = true

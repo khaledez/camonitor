@@ -52,6 +52,24 @@ type StreamConfig struct {
 	User string `json:"user"`
 	Pass string `json:"pass"`
 
+	// Door marks a stream as a door station (VTO) that exposes a magnetic-
+	// lock relay and a bell/event stream. Cameras without a door lock (e.g.
+	// plain IP cameras) leave this false, which hides the "open door"
+	// button in the UI and skips the Dahua event-attach subscription.
+	Door bool `json:"door,omitempty"`
+
+	// RTSPPathTemplate is an optional printf-style path template with a
+	// single %d placeholder that receives subtype+1 (1 = main/HD, 2 =
+	// sub/SD). It lets non-Dahua cameras (e.g. Tiandy, whose RTSP paths are
+	// /stream1 and /stream2) reuse the same HD/SD toggle machinery.
+	RTSPPathTemplate string `json:"rtsp_path_template,omitempty"`
+
+	// Codec names the video codec this stream delivers over RTSP. "h264"
+	// (default) and "h265" are supported. The WebRTC track is created with
+	// the matching codec so the browser negotiates it. Tiandy 4K cameras
+	// commonly stream H.265/HEVC on both main and sub streams.
+	Codec string `json:"codec,omitempty"`
+
 	// SIP credentials. When SIPExt is set, camonitor registers as that
 	// extension on the VTO's built-in SIP server and receives an INVITE
 	// when the call button is pressed. Empty means "no SIP for this
@@ -64,12 +82,35 @@ type StreamConfig struct {
 	DoorURLOverride string `json:"door_url,omitempty"`
 }
 
+// doorStreams returns only the streams flagged as door stations (VTO). The
+// Dahua event-attach / bell machinery only makes sense for those; plain
+// cameras have no eventManager.cgi endpoint and would otherwise spam the
+// log with reconnect attempts.
+func doorStreams(streams []StreamConfig) []StreamConfig {
+	out := make([]StreamConfig, 0, len(streams))
+	for _, s := range streams {
+		if s.Door {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // RTSPURLForSubtype returns the RTSP URL for a given Dahua subtype:
 // 0 = main stream (HD), 1 = sub stream (SD). If rtsp_url is set in config
 // we use it verbatim and the subtype is ignored.
 func (s StreamConfig) RTSPURLForSubtype(subtype int) string {
 	if s.RTSPURLOverride != "" {
 		return s.RTSPURLOverride
+	}
+	if s.RTSPPathTemplate != "" {
+		u := &url.URL{
+			Scheme: "rtsp",
+			User:   url.UserPassword(s.User, s.Pass),
+			Host:   s.Host,
+			Path:   fmt.Sprintf(s.RTSPPathTemplate, subtype+1),
+		}
+		return u.String()
 	}
 	u := &url.URL{
 		Scheme:   "rtsp",
@@ -98,6 +139,7 @@ type Config struct {
 	Listen   string          `json:"listen"`
 	SIP      SIPConfig       `json:"sip"`
 	WhatsApp *WhatsAppConfig `json:"whatsapp,omitempty"`
+	Gree     *GreeConfig     `json:"gree,omitempty"`
 	Streams  []StreamConfig  `json:"streams"`
 	// Timezone names the IANA zone used when rendering wall-clock times
 	// for outbound notifications (e.g. the WhatsApp caption). The browser
@@ -316,10 +358,11 @@ func main() {
 
 	// Dahua's HTTP event-stream is the reliable bell trigger on every
 	// VTO firmware we've tested — unlike the SIP path which depends on
-	// IsMainVTO/registration topology. Run it unconditionally for every
-	// stream alongside the SIP UA above; both feed the same BellBus and
-	// share its per-stream debounce, so duplicate triggers are harmless.
-	events := NewEventAttachClient(cfg.Streams, bell)
+	// IsMainVTO/registration topology. Run it for every door stream
+	// alongside the SIP UA above; both feed the same BellBus and share
+	// its per-stream debounce, so duplicate triggers are harmless. Plain
+	// cameras (Door=false) have no eventManager.cgi and are skipped.
+	events := NewEventAttachClient(doorStreams(cfg.Streams), bell)
 	go events.Run(ctx)
 
 	staticFS, err := fs.Sub(webFS, "web")
@@ -336,6 +379,22 @@ func main() {
 	mux.HandleFunc("/events", bell.HandleEvents)
 	mux.HandleFunc("/snapshot", bell.HandleSnapshot)
 	mux.HandleFunc("/rings", bell.HandleHistory)
+
+	// Gree climate control is optional; nil config means "skip". When
+	// absent we still mount a static "not configured" status endpoint so
+	// the web UI can hide the climate panel without a 404.
+	if cfg.Gree != nil {
+		greeCtrl := NewGreeController(*cfg.Gree)
+		go greeCtrl.Run(ctx)
+		mux.HandleFunc("/gree/status", greeCtrl.HandleStatus)
+		mux.HandleFunc("/gree/set", greeCtrl.HandleSet)
+	} else {
+		mux.HandleFunc("/gree/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(`{"configured":false}`))
+		})
+	}
 	if waClient != nil {
 		mux.HandleFunc("/wa/status", waClient.HandleStatus)
 		mux.HandleFunc("/wa/qr.png", waClient.HandleQR)

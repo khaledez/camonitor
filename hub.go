@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +98,7 @@ func NewHub(ctx context.Context, streams []StreamConfig, api *webrtc.API) (*Hub,
 		// both. The trackID part keeps the two tracks distinguishable.
 		streamID := "vto-" + s.ID
 		video, err := webrtc.NewTrackLocalStaticRTP(
-			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
+			videoCodecCapability(s),
 			"video-"+s.ID, streamID,
 		)
 		if err != nil {
@@ -178,6 +179,15 @@ func (h *Hub) Quality(streamID string) string {
 	return ""
 }
 
+// videoCodecCapability returns the WebRTC codec capability for a stream's
+// configured video codec. Defaults to H.264; "h265" selects H.265/HEVC.
+func videoCodecCapability(s StreamConfig) webrtc.RTPCodecCapability {
+	if strings.EqualFold(s.Codec, "h265") {
+		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH265, ClockRate: 90000}
+	}
+	return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}
+}
+
 // publicStream is the browser-facing view of a stream — id, name, and
 // current quality. We deliberately omit host and credentials: the browser
 // never needs them, and shipping them over the wire would expose camera
@@ -186,6 +196,9 @@ type publicStream struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Quality string `json:"quality"`
+	// Door tells the browser whether this stream has a door-lock relay, so
+	// it can render (or omit) the "open door" button.
+	Door bool `json:"door"`
 }
 
 func (h *Hub) publicStreams() []publicStream {
@@ -195,6 +208,7 @@ func (h *Hub) publicStreams() []publicStream {
 			ID:      s.ID,
 			Name:    s.Name,
 			Quality: h.Quality(s.ID),
+			Door:    s.Door,
 		}
 	}
 	return out

@@ -195,6 +195,60 @@
   }
   #lightbox.open { display: flex; }
   #lightbox img { max-width: 90vw; max-height: 90vh; }
+  /* Climate (Gree AC) panel — mirrors #side but on the left so it can't
+     overlap the Bell panel. */
+  #climate {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 340px;
+    background: #161618; border-right: 1px solid #2a2a2e;
+    transform: translateX(-100%); transition: transform 0.2s ease-out;
+    display: flex; flex-direction: column; z-index: 10;
+  }
+  #climate.open { transform: translateX(0); }
+  #climate h2 {
+    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #climate h2 .close { margin-left: auto; }
+  #climate .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
+  #climate .section h3 {
+    margin: 0 0 8px 0; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: #888;
+  }
+  #climate .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 10px;
+  }
+  #climate .row:last-child { margin-bottom: 0; }
+  #climate .row label { font-size: 13px; color: #d6d6d6; }
+  #climate select {
+    background: #2a2a2e; color: #d6d6d6; border: 1px solid #3a3a3f;
+    border-radius: 4px; padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  #climate .temp {
+    display: flex; align-items: center; gap: 8px;
+  }
+  #climate .temp .value {
+    min-width: 44px; text-align: center; font-size: 22px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  #climate .temp button {
+    width: 34px; height: 34px; font-size: 18px; padding: 0;
+  }
+  #climate .power-btn {
+    width: 100%; padding: 10px; font-size: 15px; font-weight: 600;
+  }
+  #climate .power-btn.on { background: #2d6a3e; border-color: #4a8d5e; }
+  #climate .readout {
+    font-size: 12px; color: #888; line-height: 1.6;
+    font-variant-numeric: tabular-nums;
+  }
+  #climate .readout b { color: #d6d6d6; }
+  #climate .offline {
+    color: #d97070; font-size: 13px; text-align: center; padding: 12px;
+  }
+  #climate-toggle { }
+  #climate-toggle.has-ac { box-shadow: 0 0 0 1px #5e8fc9; }
 </style>
 </head>
 <body>
@@ -206,6 +260,7 @@
     🔔
     <span class="badge" id="side-badge">0</span>
   </button>
+  <button id="climate-toggle" title="Air conditioner" hidden>❄</button>
 </header>
 <div class="grid" id="grid"></div>
 
@@ -237,6 +292,59 @@
 </aside>
 
 <div id="lightbox"><img id="lightbox-img" alt="snapshot" /></div>
+
+<aside id="climate" aria-hidden="true">
+  <h2>
+    Climate
+    <button class="close" id="climate-close">close</button>
+  </h2>
+  <div class="section">
+    <h3 id="climate-name">Air conditioner</h3>
+    <button class="power-btn" id="ac-power">…</button>
+    <div class="row" style="margin-top:12px;">
+      <label for="ac-mode">Mode</label>
+      <select id="ac-mode">
+        <option value="0">Auto</option>
+        <option value="1">Cool</option>
+        <option value="2">Dry</option>
+        <option value="3">Fan</option>
+        <option value="4">Heat</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Temperature</label>
+      <div class="temp">
+        <button id="ac-temp-down" title="lower">−</button>
+        <span class="value" id="ac-temp">–</span>
+        <button id="ac-temp-up" title="raise">+</button>
+      </div>
+    </div>
+    <div class="row">
+      <label for="ac-fan">Fan speed</label>
+      <select id="ac-fan">
+        <option value="0">Auto</option>
+        <option value="1">Low</option>
+        <option value="2">Med-low</option>
+        <option value="3">Medium</option>
+        <option value="4">Med-high</option>
+        <option value="5">High</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="ac-swing">Vertical swing</label>
+      <select id="ac-swing">
+        <option value="0">Default</option>
+        <option value="1">Full swing</option>
+        <option value="2">Upmost</option>
+        <option value="3">Mid-up</option>
+        <option value="4">Middle</option>
+        <option value="5">Mid-low</option>
+        <option value="6">Lowest</option>
+      </select>
+    </div>
+    <div class="readout" id="ac-readout">loading…</div>
+  </div>
+</aside>
 
 <script>
 const statusEl = document.getElementById('status');
@@ -463,7 +571,7 @@ async function connectInner() {
       if (!confirmed) return;
       openDoor(s.id, doorBtn);
     });
-    cell.appendChild(doorBtn);
+    if (s.door) cell.appendChild(doorBtn);
 
     const stalledFlag = document.createElement('div');
     stalledFlag.className = 'stalled-flag';
@@ -817,6 +925,136 @@ sideClose.addEventListener('click', () => {
   stopWAPolling();
 });
 lightbox.addEventListener('click', () => lightbox.classList.remove('open'));
+
+// ── Climate (Gree AC) panel ─────────────────────────────────────────────
+const climateEl = document.getElementById('climate');
+const climateToggle = document.getElementById('climate-toggle');
+const climateClose = document.getElementById('climate-close');
+const climateName = document.getElementById('climate-name');
+const acPower = document.getElementById('ac-power');
+const acMode = document.getElementById('ac-mode');
+const acFan = document.getElementById('ac-fan');
+const acSwing = document.getElementById('ac-swing');
+const acTemp = document.getElementById('ac-temp');
+const acReadout = document.getElementById('ac-readout');
+
+let acState = null; // latest /gree/status payload
+let acSending = false;
+
+const MODE_NAMES = ['Auto', 'Cool', 'Dry', 'Fan', 'Heat'];
+const FAN_NAMES = ['Auto', 'Low', 'Med-low', 'Medium', 'Med-high', 'High'];
+
+async function acSend(params) {
+  if (acSending) return;
+  acSending = true;
+  try {
+    const res = await fetch('/gree/set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) throw new Error('http ' + res.status);
+    // The server refreshes status after a successful set; pull it in.
+    await refreshAC();
+  } catch (err) {
+    console.error('ac set failed:', err);
+    setStatus('AC command failed: ' + err.message, 'err');
+  } finally {
+    acSending = false;
+  }
+}
+
+function renderAC() {
+  if (!acState || !acState.configured) return;
+  if (acState.online) {
+    acPower.textContent = acState.power ? 'Turn OFF' : 'Turn ON';
+    acPower.classList.toggle('on', !!acState.power);
+    acPower.disabled = false;
+    acMode.disabled = false;
+    acFan.disabled = false;
+    acSwing.disabled = false;
+    acMode.value = String(acState.mode);
+    acFan.value = String(acState.fan_speed);
+    acSwing.value = String(acState.swing_v);
+    acTemp.textContent = acState.set_temp + (acState.temp_unit ? '°F' : '°C');
+    const mode = MODE_NAMES[acState.mode] || ('mode ' + acState.mode);
+    const fan = FAN_NAMES[acState.fan_speed] || ('fan ' + acState.fan_speed);
+    let readout = '<b>' + (acState.power ? 'On' : 'Off') + '</b> · ' + mode + ' · ' + fan +
+      ' · set ' + acState.set_temp + (acState.temp_unit ? '°F' : '°C');
+    if (acState.room_temp > 0) readout += ' · room ' + acState.room_temp + '°C';
+    if (acState.turbo) readout += ' · turbo';
+    if (acState.quiet) readout += ' · quiet';
+    if (acState.energy_save) readout += ' · eco';
+    readout += '<br>updated ' + new Date(acState.last_updated).toLocaleTimeString();
+    acReadout.innerHTML = readout;
+  } else {
+    acPower.textContent = '…';
+    acPower.disabled = true;
+    acMode.disabled = true;
+    acFan.disabled = true;
+    acSwing.disabled = true;
+    acTemp.textContent = '–';
+    acReadout.innerHTML = '<div class="offline">unit unreachable</div>';
+  }
+}
+
+async function refreshAC() {
+  let st;
+  try {
+    st = await fetch('/gree/status').then(r => r.json());
+  } catch (_) { return; }
+  if (!st.configured) {
+    climateToggle.hidden = true;
+    return;
+  }
+  climateToggle.hidden = false;
+  acState = st;
+  if (st.name) climateName.textContent = st.name;
+  renderAC();
+}
+
+acPower.addEventListener('click', () => {
+  if (!acState) return;
+  acSend({ power: acState.power ? 0 : 1 });
+});
+acMode.addEventListener('change', () => acSend({ mode: Number(acMode.value) }));
+acFan.addEventListener('change', () => acSend({ fan: Number(acFan.value) }));
+acSwing.addEventListener('change', () => acSend({ swing: Number(acSwing.value) }));
+document.getElementById('ac-temp-up').addEventListener('click', () => {
+  if (!acState) return;
+  acSend({ temp: acState.set_temp + 1 });
+});
+document.getElementById('ac-temp-down').addEventListener('click', () => {
+  if (!acState) return;
+  acSend({ temp: acState.set_temp - 1 });
+});
+
+climateToggle.addEventListener('click', () => {
+  const opening = !climateEl.classList.contains('open');
+  climateEl.classList.toggle('open');
+  climateEl.setAttribute('aria-hidden', !opening);
+  if (opening) { refreshAC(); startACPolling(); }
+  else stopACPolling();
+});
+climateClose.addEventListener('click', () => {
+  climateEl.classList.remove('open');
+  climateEl.setAttribute('aria-hidden', 'true');
+  stopACPolling();
+});
+
+// Poll AC status while the panel is open (and once on load to decide
+// whether to show the toggle).
+let acPollTimer = null;
+function startACPolling() {
+  if (acPollTimer) return;
+  refreshAC();
+  acPollTimer = setInterval(refreshAC, 10000);
+}
+function stopACPolling() {
+  if (acPollTimer) { clearInterval(acPollTimer); acPollTimer = null; }
+}
+refreshAC().then(() => { if (!climateToggle.hidden) startACPolling(); });
+
 
 // One initial WA status check so we can show the pairing alert immediately
 // if the server is unpaired — saves the user from having to open the panel

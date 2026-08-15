@@ -1,11 +1,14 @@
 # camonitor
 
 Bridge multiple Dahua VTO (or other RTSP) cameras into a single WebRTC web
-page, with a per-stream HD/SD toggle and a one-click door-unlock button.
+page, with a per-stream HD/SD toggle, a one-click door-unlock button, and
+an optional Gree Wi-Fi air-conditioner monitoring/control panel.
 
 The whole server is one static Go binary. The only third-party Go dependency
 is [pion/webrtc](https://github.com/pion/webrtc); the RTSP client is hand-
-rolled in `rtsp.go` (RTSP-over-TCP, HTTP-Digest, single H.264 media).
+rolled in `rtsp.go` (RTSP-over-TCP, HTTP-Digest, single H.264 or H.265
+media) and the Gree client is hand-rolled in `gree.go` (AES-128-ECB
+JSON-over-UDP on port 7000).
 
 ## Run with Docker (recommended)
 
@@ -108,6 +111,9 @@ let camonitor build the Dahua-specific URLs.
 | `host`     | yes¹     | Camera IP/hostname. Default RTSP port (554) and HTTP port (80) are assumed. |
 | `user`     |          | Account username. Used for both RTSP and the door-open HTTP endpoint. |
 | `pass`     |          | Account password. |
+| `door`     | no       | Set `true` for door stations (VTO). Shows the "open door" button and subscribes to the Dahua bell/event stream. Leave unset for plain cameras. |
+| `codec`    | no       | Video codec delivered over RTSP: `h264` (default) or `h265`. Use `h265` for HEVC cameras (e.g. Tiandy 4K). |
+| `rtsp_path_template` | no | printf-style RTSP path with one `%d` placeholder filled with subtype+1 (1 = main/HD, 2 = sub/SD). Lets non-Dahua cameras (e.g. Tiandy `/stream1`, `/stream2`) reuse the HD/SD toggle. |
 | `rtsp_url` | no       | Override for the full RTSP URL. Use this for non-Dahua cameras or non-default channels/subtypes. |
 | `door_url` | no       | Override for the door-open HTTP endpoint. Use this if your VTO firmware exposes a different path. |
 | `sip_ext`  | no       | SIP extension number to register on the VTO's built-in SIP server (e.g. `9901`). Set this to receive bell-press notifications; leave empty to disable SIP for this camera. |
@@ -127,9 +133,11 @@ the active RTSP connection and starts a fresh one at the new resolution
 behind the same WebRTC track — no SDP renegotiation. The browser typically
 freezes for a fraction of a second until the next keyframe arrives.
 
-If your camera's main stream is H.265 (some newer Dahua firmware), the
-RTSP client will fail to find an H.264 media and the tile will show no
-video; flip back to SD. (H.265 support is a future extension.)
+If your camera's main stream is H.265 (some newer Dahua firmware, and most
+Tiandy 4K units), set `"codec": "h265"` on that stream so the WebRTC track
+negotiates HEVC. Note that HEVC WebRTC playback requires a browser with
+H.265 decode support (Safari, or Chrome/Edge with hardware decode);
+Firefox does not support H.265 in WebRTC.
 
 ## Door open
 
@@ -221,6 +229,37 @@ Notes:
   no Meta Business account, but is technically against WhatsApp ToS.
   For low-volume household use the practical risk is small; if you
   need an ToS-clean path, swap in the WhatsApp Cloud API.
+
+## Gree air conditioner
+
+Add an optional `gree` block to config to enable monitoring & control of a
+Gree Wi-Fi unit (the JSON-over-UDP "Gree Smart" protocol on port 7000):
+
+```json
+{
+  "gree": {
+    "host": "192.168.88.44",
+    "port": 7000,
+    "name": "Living Room AC"
+  }
+}
+```
+
+| field  | required | meaning |
+| ------ | -------- | ------- |
+| `host` | yes      | AC IP/hostname. |
+| `port` | no       | UDP port. Defaults to `7000`. |
+| `name` | no       | Display label in the UI. Defaults to `host`. |
+
+A ❄ button appears in the header when a unit is configured. The panel shows
+current state (power, mode, set temp, fan speed, swing, room temp) and lets
+you toggle power, change mode/temp/fan/swing. Status is polled every ~10s so
+changes made from the physical remote show up too.
+
+Backend endpoints: `GET /gree/status` returns the current state;
+`POST /gree/set` applies one or more params (e.g. `{"power":1,"mode":1,
+"temp":24,"fan":3}`). The server scans, binds, and caches the unit's
+per-device AES key automatically.
 
 ## Run from source
 
