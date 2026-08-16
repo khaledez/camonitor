@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -183,10 +184,21 @@ type hkStreamSession struct {
 // pendingSetup is what SetupEndpoints established, held until
 // SelectedRTPStreamConfiguration says to start.
 type pendingSetup struct {
+	// conn is the accessory's RTP socket, bound here rather than at
+	// stream-start because its port is part of the answer the controller
+	// is given — it addresses RTCP to it.
+	conn      *net.UDPConn
 	target    *net.UDPAddr
 	videoKey  []byte
 	videoSalt []byte
 	videoSSRC uint32
+	response  []byte // the TLV answered with, replayed on read
+}
+
+func (p *pendingSetup) close() {
+	if p != nil && p.conn != nil {
+		p.conn.Close()
+	}
 }
 
 func newHKStreamSession(s StreamConfig, label string) *hkStreamSession {
@@ -201,9 +213,59 @@ func newHKStreamSession(s StreamConfig, label string) *hkStreamSession {
 	setTLV(sess.svc.SupportedRTPConfiguration.Bytes, rtp.NewConfiguration(rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80))
 	sess.setStreamingStatus(rtp.StreamingStatusAvailable)
 
-	sess.svc.SetupEndpoints.OnSetRemoteValue(sess.onSetupEndpoints)
+	// SetupEndpoints is a write-response characteristic: the controller
+	// learns our address, SSRC and keys from the reply to its own write.
+	// hap does not mark it as one and its Bytes helper discards handler
+	// return values, so both are wired by hand.
+	//
+	// This matters more than it looks. hap assigns the controller's value
+	// to the characteristic *after* the handler returns, so answering by
+	// writing into the characteristic — the obvious approach, and the one
+	// that shipped in v0.9.0 — has the answer immediately overwritten by
+	// the request. iOS then has no endpoint to stream to and gives up
+	// without ever sending a start command.
+	sess.svc.SetupEndpoints.Permissions = []string{
+		characteristic.PermissionRead,
+		characteristic.PermissionWrite,
+		characteristic.PermissionWriteResponse,
+	}
+	sess.svc.SetupEndpoints.SetValueRequestFunc = func(v any, _ *http.Request) (any, int) {
+		encoded, ok := v.(string)
+		if !ok {
+			return nil, hapStatusInvalidValue
+		}
+		b, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, hapStatusInvalidValue
+		}
+		resp, err := sess.onSetupEndpoints(b)
+		if err != nil {
+			log.Printf("homekit camera [%s]: setup endpoints: %v", sess.label, err)
+			return nil, hapStatusInvalidValue
+		}
+		return base64.StdEncoding.EncodeToString(resp), 0
+	}
+	// And a plain read must return the answer too, not the request hap
+	// left in the stored value.
+	sess.svc.SetupEndpoints.ValueRequestFunc = func(*http.Request) (any, int) {
+		s := sess.currentSetup()
+		if s == nil {
+			return "", 0
+		}
+		return base64.StdEncoding.EncodeToString(s.response), 0
+	}
+
 	sess.svc.SelectedRTPStreamConfiguration.OnSetRemoteValue(sess.onSelectedConfiguration)
 	return sess
+}
+
+// hapStatusInvalidValue is HAP-R2's "invalid value in write" status.
+const hapStatusInvalidValue = -70410
+
+func (s *hkStreamSession) currentSetup() *pendingSetup {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending
 }
 
 func setTLV(c *characteristic.Bytes, v any) {
@@ -220,48 +282,56 @@ func (s *hkStreamSession) setStreamingStatus(status byte) {
 }
 
 // onSetupEndpoints answers the controller's "here is where to send, and
-// the key to encrypt with" with our own address, SSRC and key.
-func (s *hkStreamSession) onSetupEndpoints(b []byte) error {
+// the key to encrypt with" with our own address, port, SSRC and key. It
+// returns the TLV to reply with.
+func (s *hkStreamSession) onSetupEndpoints(b []byte) ([]byte, error) {
 	var req rtp.SetupEndpoints
 	if err := tlv8.Unmarshal(b, &req); err != nil {
-		return fmt.Errorf("parse SetupEndpoints: %w", err)
+		return nil, fmt.Errorf("parse SetupEndpoints: %w", err)
 	}
 
 	target, err := net.ResolveUDPAddr("udp",
 		net.JoinHostPort(req.ControllerAddr.IPAddr, fmt.Sprintf("%d", req.ControllerAddr.VideoRtpPort)))
 	if err != nil {
-		return fmt.Errorf("controller address: %w", err)
+		return nil, fmt.Errorf("controller address: %w", err)
 	}
 
 	// The accessory's own address has to be one the controller can reach.
 	// Under hostNetwork that is simply the LAN address facing it.
 	localIP, err := localAddrFacing(target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	// Bind now, so the port we advertise is the port we will actually
+	// send from and receive RTCP on.
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+	if err != nil {
+		return nil, fmt.Errorf("bind rtp socket: %w", err)
+	}
+	localPort := uint16(conn.LocalAddr().(*net.UDPAddr).Port)
+
 	setup := &pendingSetup{
+		conn:      conn,
 		target:    target,
 		videoKey:  req.Video.MasterKey,
 		videoSalt: req.Video.MasterSalt,
-		videoSSRC: randomUint32(),
+		// Masked to stay inside int32: the TLV field is signed, and a
+		// negative SSRC is not something a controller expects.
+		videoSSRC: randomUint32() & 0x7FFFFFFF,
 	}
-
-	s.mu.Lock()
-	s.pending = setup
-	s.mu.Unlock()
 
 	// Our half of the key exchange. We send no audio, but the response
 	// must still carry a well-formed audio suite.
 	accKey, accSalt := randomSRTPKeySalt()
-	resp := rtp.SetupEndpointsResponse{
+	resp, err := tlv8.Marshal(rtp.SetupEndpointsResponse{
 		SessionId: req.SessionId,
 		Status:    rtp.SessionStatusSuccess,
 		AccessoryAddr: rtp.Addr{
 			IPVersion:    req.ControllerAddr.IPVersion,
 			IPAddr:       localIP,
-			VideoRtpPort: req.ControllerAddr.VideoRtpPort,
-			AudioRtpPort: req.ControllerAddr.AudioRtpPort,
+			VideoRtpPort: localPort,
+			AudioRtpPort: localPort,
 		},
 		Video: rtp.CryptoSuite{
 			Type:       rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80,
@@ -274,12 +344,24 @@ func (s *hkStreamSession) onSetupEndpoints(b []byte) error {
 			MasterSalt: accSalt,
 		},
 		SsrcVideo: int32(setup.videoSSRC),
-		SsrcAudio: int32(randomUint32()),
+		SsrcAudio: int32(randomUint32() & 0x7FFFFFFF),
+	})
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("marshal SetupEndpoints response: %w", err)
 	}
-	setTLV(s.svc.SetupEndpoints.Bytes, resp)
+	setup.response = resp
 
-	log.Printf("homekit camera [%s]: endpoints set up, controller %s", s.label, target)
-	return nil
+	s.mu.Lock()
+	previous := s.pending
+	s.pending = setup
+	s.mu.Unlock()
+	// iOS renegotiates freely; without this each attempt leaks a socket.
+	previous.close()
+
+	log.Printf("homekit camera [%s]: endpoints set up — controller %s, accessory %s:%d",
+		s.label, target, localIP, localPort)
+	return resp, nil
 }
 
 // onSelectedConfiguration starts, stops or reconfigures the stream.
@@ -315,6 +397,7 @@ func (s *hkStreamSession) startStream(cfg rtp.StreamConfiguration) error {
 
 	fwd, err := newSRTPForwarder(
 		s.stream.ID,
+		setup.conn,
 		setup.target,
 		setup.videoKey,
 		setup.videoSalt,

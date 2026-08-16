@@ -336,6 +336,10 @@ Notes:
 - Live view opens the camera's sub stream for small requests and the main
   stream at 720p and above. Each simultaneous viewer costs one more RTSP
   session to that camera; two are allowed per camera.
+- If live view shows "No Response", check the logs for a
+  `homekit camera [...]: endpoints set up` line with no
+  `streaming ... to ...` line after it — that means iOS negotiated but
+  found no usable endpoint and gave up.
 - No two-way audio. HomeKit requires a camera to advertise an audio codec,
   so one is declared and a muted microphone is present, but camonitor
   sends no audio and ignores any it receives.

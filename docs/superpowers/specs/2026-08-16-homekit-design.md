@@ -290,6 +290,27 @@ SinglePress`; HomeKit's snapshot request serves the cached JPEG, falling
 back to a live `FetchSnapshot` when it is stale or missing. This is the
 rich notification, built almost entirely from existing machinery.
 
+**SetupEndpoints is a write-response characteristic**, and getting that
+wrong is invisible until an iPhone is pointed at it. The controller learns
+the accessory's address, port, SSRC and keys from the *reply to its own
+write*, not from a later read. Two things follow, both of which the first
+implementation got wrong:
+
+- `hap` declares the characteristic `[pr, pw]` and its `Bytes` helper
+  discards handler return values, so the permission and the
+  `SetValueRequestFunc` are wired by hand. Answering by writing into the
+  characteristic does not work: `hap` assigns the controller's value
+  *after* the handler returns, overwriting the answer with the request.
+- The accessory's RTP socket is bound during `SetupEndpoints`, not at
+  stream-start, because the port is part of that answer — the controller
+  addresses RTCP to it. Echoing the controller's own port back, or binding
+  an ephemeral port later, advertises somewhere nothing is listening.
+
+With either mistake iOS completes `SetupEndpoints`, finds no usable
+endpoint, and abandons the stream without sending a start command. The
+Home app shows "No Response" and the logs show a setup with no stream
+following it — which is exactly how this was diagnosed.
+
 **Streaming.** On `SetupEndpoints` iOS supplies its address and the SRTP
 master key and salt; on `SelectedStreamConfiguration` it selects
 resolution, framerate, bitrate, MTU, payload type, and SSRC. camonitor
@@ -349,6 +370,11 @@ to pure logic with no network and no hardware:
 - Setup-code validation, including Apple's rejected codes.
 - Temperature round-trips through both Celsius and Fahrenheit units, and
   an offline poll leaving the last known values in place.
+- `SetupEndpoints` end to end: that the write returns a decodable
+  response rather than echoing the request, that the advertised port is
+  the one actually bound, and that renegotiation closes the superseded
+  socket. Both halves of the "No Response" defect are covered, and both
+  tests were confirmed to fail against the code that shipped it.
 - The SRTP forwarder end to end: packets shaped like the camera's go in,
   and a real UDP listener decrypts them with the key HomeKit would have
   supplied, asserting the SSRC, payload type, contiguous sequence and

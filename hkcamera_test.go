@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/brutella/hap/characteristic"
 	"github.com/brutella/hap/rtp"
 	"github.com/brutella/hap/service"
+	"github.com/brutella/hap/tlv8"
 )
 
 func testBellBus(t *testing.T) (*BellBus, snapshotFetcher) {
@@ -249,4 +254,123 @@ func TestPairingOneAccessoryLeavesTheOthersPairable(t *testing.T) {
 			t.Errorf("%q reported paired when it is not", a.Name)
 		}
 	}
+}
+
+// setupEndpointsRequest builds the TLV iOS writes to begin a stream.
+func setupEndpointsRequest(t *testing.T, controllerPort uint16) string {
+	t.Helper()
+	key, salt := randomSRTPKeySalt()
+	b, err := tlv8.Marshal(rtp.SetupEndpoints{
+		SessionId: []byte("0123456789abcdef"),
+		ControllerAddr: rtp.Addr{
+			IPVersion:    rtp.IPAddrVersionv4,
+			IPAddr:       "127.0.0.1",
+			VideoRtpPort: controllerPort,
+			AudioRtpPort: controllerPort + 1,
+		},
+		Video: rtp.CryptoSuite{Type: rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80, MasterKey: key, MasterSalt: salt},
+		Audio: rtp.CryptoSuite{Type: rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80, MasterKey: key, MasterSalt: salt},
+	})
+	if err != nil {
+		t.Fatalf("marshal SetupEndpoints: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// TestSetupEndpointsAnswersTheController is the regression test for the
+// defect that shipped in v0.9.0: the answer was written into the same
+// characteristic the controller had just written, and hap overwrites it
+// with the request immediately afterwards. iOS was left with no endpoint
+// and abandoned the stream before ever sending a start command — the Home
+// app showed "No Response".
+func TestSetupEndpointsAnswersTheController(t *testing.T) {
+	sess := newHKStreamSession(testStreams[0], "vto1/0")
+
+	if !sess.svc.SetupEndpoints.IsWriteResponse() {
+		t.Fatal("SetupEndpoints is not marked write-response; the controller cannot receive the answer")
+	}
+
+	const controllerPort = 50000
+	request := setupEndpointsRequest(t, controllerPort)
+
+	value, code := sess.svc.SetupEndpoints.C.SetValueRequest(
+		request, httptest.NewRequest(http.MethodPut, "/characteristics", nil))
+	if code != 0 {
+		t.Fatalf("SetupEndpoints write rejected with status %d", code)
+	}
+
+	encoded, ok := value.(string)
+	if !ok || encoded == "" {
+		t.Fatalf("write returned %#v, want a base64 TLV answer", value)
+	}
+	if encoded == request {
+		t.Fatal("write echoed the controller's own request back; that is the v0.9.0 bug")
+	}
+
+	resp := decodeSetupResponse(t, encoded)
+	if resp.Status != rtp.SessionStatusSuccess {
+		t.Errorf("status = %d, want success", resp.Status)
+	}
+
+	// The advertised port must be one we actually bound — the controller
+	// addresses RTCP to it. v0.9.0 echoed the controller's own port.
+	bound := uint16(sess.currentSetup().conn.LocalAddr().(*net.UDPAddr).Port)
+	if resp.AccessoryAddr.VideoRtpPort != bound {
+		t.Errorf("advertised video port %d, but bound %d",
+			resp.AccessoryAddr.VideoRtpPort, bound)
+	}
+	if resp.AccessoryAddr.VideoRtpPort == controllerPort {
+		t.Error("advertised the controller's own port as the accessory's")
+	}
+	if resp.SsrcVideo < 0 {
+		t.Errorf("SsrcVideo = %d, want non-negative", resp.SsrcVideo)
+	}
+
+	// A plain read must return the answer too, not the request hap left in
+	// the stored value.
+	readBack, code := sess.svc.SetupEndpoints.C.ValueRequest(
+		httptest.NewRequest(http.MethodGet, "/characteristics", nil))
+	if code != 0 {
+		t.Fatalf("read rejected with status %d", code)
+	}
+	if readBack != encoded {
+		t.Error("reading SetupEndpoints did not return the answer")
+	}
+}
+
+// Renegotiation is routine on iOS; each attempt must not leak its socket.
+func TestRepeatedSetupClosesThePreviousSocket(t *testing.T) {
+	sess := newHKStreamSession(testStreams[0], "vto1/0")
+	put := httptest.NewRequest(http.MethodPut, "/characteristics", nil)
+
+	if _, code := sess.svc.SetupEndpoints.C.SetValueRequest(setupEndpointsRequest(t, 50000), put); code != 0 {
+		t.Fatalf("first setup rejected: %d", code)
+	}
+	first := sess.currentSetup().conn
+
+	if _, code := sess.svc.SetupEndpoints.C.SetValueRequest(setupEndpointsRequest(t, 50002), put); code != 0 {
+		t.Fatalf("second setup rejected: %d", code)
+	}
+	second := sess.currentSetup().conn
+
+	if first == second {
+		t.Fatal("second setup reused the first socket")
+	}
+	// Writing to a closed socket errors; that is how we know it was closed.
+	if _, err := first.WriteToUDP([]byte("x"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}); err == nil {
+		t.Error("the superseded socket is still open")
+	}
+}
+
+func decodeSetupResponse(t *testing.T, encoded string) rtp.SetupEndpointsResponse {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	var resp rtp.SetupEndpointsResponse
+	if err := tlv8.Unmarshal(b, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp
 }

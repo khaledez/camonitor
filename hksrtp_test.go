@@ -27,7 +27,12 @@ func TestForwarderProducesDecryptableStream(t *testing.T) {
 		wantPT   = uint8(99)
 	)
 
-	fwd, err := newSRTPForwarder("vto1", listener.LocalAddr().(*net.UDPAddr), key, salt, wantSSRC, wantPT, 1378)
+	sender, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("bind sender: %v", err)
+	}
+
+	fwd, err := newSRTPForwarder("vto1", sender, listener.LocalAddr().(*net.UDPAddr), key, salt, wantSSRC, wantPT, 1378)
 	if err != nil {
 		t.Fatalf("newSRTPForwarder: %v", err)
 	}
@@ -100,7 +105,12 @@ func TestForwarderWriteAfterCloseIsHarmless(t *testing.T) {
 	defer listener.Close()
 
 	key, salt := randomSRTPKeySalt()
-	fwd, err := newSRTPForwarder("vto1", listener.LocalAddr().(*net.UDPAddr), key, salt, 1, 99, 1378)
+	sender, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("bind sender: %v", err)
+	}
+
+	fwd, err := newSRTPForwarder("vto1", sender, listener.LocalAddr().(*net.UDPAddr), key, salt, 1, 99, 1378)
 	if err != nil {
 		t.Fatalf("newSRTPForwarder: %v", err)
 	}
