@@ -282,7 +282,7 @@ func (w *WhatsAppClient) clearQR() {
 func renderQRPNG(text string) []byte {
 	code, err := qr.Encode(text, qr.M)
 	if err != nil {
-		log.Printf("whatsapp: qr encode failed: %v", err)
+		log.Printf("qr encode failed: %v", err)
 		return nil
 	}
 	return code.PNG()

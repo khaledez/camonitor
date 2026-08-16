@@ -254,6 +254,53 @@
   }
   #climate-toggle { }
   #climate-toggle.has-ac { box-shadow: 0 0 0 1px #5e8fc9; }
+
+  /* HomeKit pairing — a centred dialog rather than a third slide-in panel,
+     which would collide with Bell (right) and Climate (left). Pairing is a
+     one-off setup task, so a modal suits it better anyway. */
+  #homekit {
+    position: fixed; inset: 0; z-index: 20;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+  }
+  #homekit.open { display: flex; }
+  #homekit .card {
+    width: 340px; max-height: 90vh; overflow-y: auto;
+    background: #161618; border: 1px solid #2a2a2e; border-radius: 8px;
+  }
+  #homekit h2 {
+    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #homekit h2 .close { margin-left: auto; }
+  #homekit .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
+  #homekit .section:last-child { border-bottom: none; }
+  #homekit [hidden] { display: none !important; }
+  #homekit .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 9px;
+    font-size: 11px; font-weight: 600;
+  }
+  #homekit .pill.paired   { background: #2d6a3e; color: #b8e0c0; }
+  #homekit .pill.unpaired { background: #6a4a2d; color: #f0c060; }
+  #homekit .qr-wrap { display: flex; flex-direction: column; align-items: center; }
+  #homekit .qr-wrap img {
+    width: 200px; height: 200px; image-rendering: pixelated;
+    background: #fff; padding: 8px; border-radius: 4px;
+  }
+  #homekit .code {
+    margin-top: 8px; font-size: 22px; font-weight: 600; letter-spacing: 2px;
+    font-variant-numeric: tabular-nums; color: #d6d6d6;
+  }
+  #homekit .hint { font-size: 11px; color: #888; margin-top: 8px; text-align: center; line-height: 1.6; }
+  #homekit .accessories { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+  #homekit .accessories li {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 5px 0; border-bottom: 1px solid #2a2a2e; color: #d6d6d6;
+  }
+  #homekit .accessories li:last-child { border-bottom: none; }
+  #homekit .accessories li .count { color: #888; }
+  #homekit-toggle.unpaired { box-shadow: 0 0 0 1px #f0c060; }
 </style>
 </head>
 <body>
@@ -266,6 +313,7 @@
     <span class="badge" id="side-badge">0</span>
   </button>
   <button id="climate-toggle" title="Air conditioner" hidden>❄</button>
+  <button id="homekit-toggle" title="HomeKit pairing" hidden>🏠</button>
 </header>
 <div class="grid" id="grid"></div>
 
@@ -350,6 +398,32 @@
     <div class="readout" id="ac-readout">loading…</div>
   </div>
 </aside>
+
+<div id="homekit" aria-hidden="true">
+  <div class="card">
+    <h2>
+      HomeKit
+      <button class="close" id="hk-close">close</button>
+    </h2>
+    <div class="section">
+      <div id="hk-state">loading…</div>
+    </div>
+    <div class="section qr-wrap" id="hk-qr-wrap">
+      <img id="hk-qr" alt="HomeKit setup code" />
+      <div class="code" id="hk-code">–</div>
+      <div class="hint">
+        Home app → <b>+</b> → Add Accessory → scan this code.<br>
+        Your iPhone must be on the same network as camonitor.
+      </div>
+    </div>
+    <div class="section">
+      <ul class="accessories" id="hk-accessories"></ul>
+      <div class="hint" id="hk-paired-hint" hidden>
+        To remove or re-pair, delete the accessory in the Home app.
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 const statusEl = document.getElementById('status');
@@ -1059,6 +1133,75 @@ function stopACPolling() {
   if (acPollTimer) { clearInterval(acPollTimer); acPollTimer = null; }
 }
 refreshAC().then(() => { if (!climateToggle.hidden) startACPolling(); });
+
+
+// ---- HomeKit pairing ----------------------------------------------------
+
+const hkEl = document.getElementById('homekit');
+const hkToggle = document.getElementById('homekit-toggle');
+const hkState = document.getElementById('hk-state');
+const hkQR = document.getElementById('hk-qr');
+const hkCode = document.getElementById('hk-code');
+const hkQRWrap = document.getElementById('hk-qr-wrap');
+const hkAccessories = document.getElementById('hk-accessories');
+const hkPairedHint = document.getElementById('hk-paired-hint');
+
+async function refreshHomeKit() {
+  let st;
+  try {
+    st = await fetch('/homekit/status').then(r => r.json());
+  } catch (_) { return; }
+
+  if (!st.configured) {
+    hkToggle.hidden = true;
+    return;
+  }
+  hkToggle.hidden = false;
+  hkToggle.classList.toggle('unpaired', !st.paired);
+
+  hkState.innerHTML = st.paired
+    ? '<span class="pill paired">paired</span>'
+    : '<span class="pill unpaired">not paired</span>';
+
+  // The server withholds the setup code once paired — it's a permanent
+  // credential for the door locks — so the QR section goes away with it.
+  hkQRWrap.hidden = st.paired;
+  hkPairedHint.hidden = !st.paired;
+  hkCode.textContent = st.pin || '';
+
+  hkAccessories.replaceChildren();
+  for (const a of st.accessories || []) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = a.name;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = a.controllers === 1 ? '1 controller' : a.controllers + ' controllers';
+    li.append(name, count);
+    hkAccessories.append(li);
+  }
+}
+
+// Cache-busted so the browser doesn't keep showing a QR the server has
+// since stopped serving.
+function reloadHomeKitQR() {
+  hkQR.src = '/homekit/qr.png?t=' + Date.now();
+}
+
+hkToggle.addEventListener('click', () => {
+  const opening = !hkEl.classList.contains('open');
+  hkEl.classList.toggle('open');
+  hkEl.setAttribute('aria-hidden', !opening);
+  if (opening) { reloadHomeKitQR(); refreshHomeKit(); }
+});
+function closeHomeKit() {
+  hkEl.classList.remove('open');
+  hkEl.setAttribute('aria-hidden', 'true');
+}
+document.getElementById('hk-close').addEventListener('click', closeHomeKit);
+hkEl.addEventListener('click', (e) => { if (e.target === hkEl) closeHomeKit(); });
+
+refreshHomeKit();
 
 
 // One initial WA status check so we can show the pairing alert immediately
