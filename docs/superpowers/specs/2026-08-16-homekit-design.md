@@ -1,8 +1,21 @@
 # HomeKit support for camonitor
 
-Status: approved 2026-08-16. Phase 1 (the bridge) shipped in v0.8.0 and
-is verified on hardware. Phase 2 (camera and doorbell accessories) is
-implemented; its streaming half is not yet hardware-verified.
+Status: shipped and verified on hardware as of v0.9.2. Phase 1 (the
+bridge) landed in v0.8.0; phase 2 (camera and doorbell accessories) in
+v0.9.0, with live streaming working after the fixes in v0.9.1 and v0.9.2.
+
+Verified against the real devices: pairing of the bridge and both
+doorbells, the two locks, the air conditioner, and live camera view. Not
+yet exercised: a bell press raising a HomeKit notification — the code path
+is the same `BellBus` subscription the web UI and WhatsApp already use, but
+no one has pressed the button since.
+
+Three defects reached production before live view worked, each now covered
+by a regression test confirmed to fail against the release that shipped
+it. They are described where the relevant design decision lives rather
+than collected here, because each one is a consequence of a specific
+choice: the shared QR under "Constraints that shaped the design", and the
+SetupEndpoints and SRTP key handling under "Phase 2 accessories".
 
 ## Goal
 
@@ -311,6 +324,15 @@ endpoint, and abandons the stream without sending a start command. The
 Home app shows "No Response" and the logs show a setup with no stream
 following it — which is exactly how this was diagnosed.
 
+**The controller's SRTP keys are echoed back, not replaced.** The spec is
+ambiguous about which side's key encrypts the accessory's outbound video,
+and the answer is not observable from the accessory: a wrong guess simply
+means the controller decrypts noise and tears the stream down a second or
+two later, which is indistinguishable from a dozen other faults. Echoing
+the controller's suites in the response makes the question moot — request,
+response and the encryption key are then one value, so either reading
+works. It is also what the reference implementation does.
+
 **Streaming.** On `SetupEndpoints` iOS supplies its address and the SRTP
 master key and salt; on `SelectedStreamConfiguration` it selects
 resolution, framerate, bitrate, MTU, payload type, and SSRC. camonitor
@@ -320,7 +342,7 @@ type, and sequence numbers on each H.264 RTP packet, encrypts with
 `pion/srtp/v3`, and sends UDP to the iOS endpoint. `pion/srtp/v3` is
 already in the dependency graph via `pion/webrtc`.
 
-Three known sharp edges:
+Known sharp edges:
 
 - iOS rejects a camera accessory that advertises no audio codec. We
   advertise Opus in `SupportedAudioStreamConfiguration` and never send
@@ -372,7 +394,8 @@ to pure logic with no network and no hardware:
   an offline poll leaving the last known values in place.
 - `SetupEndpoints` end to end: that the write returns a decodable
   response rather than echoing the request, that the advertised port is
-  the one actually bound, and that renegotiation closes the superseded
+  the one actually bound, that the advertised SRTP key is the one the
+  forwarder encrypts with, and that renegotiation closes the superseded
   socket. Both halves of the "No Response" defect are covered, and both
   tests were confirmed to fail against the code that shipped it.
 - The SRTP forwarder end to end: packets shaped like the camera's go in,
