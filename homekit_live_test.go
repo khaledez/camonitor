@@ -51,11 +51,35 @@ func waitForPort(t *testing.T, port int, want bool, within time.Duration) {
 func newLiveManager(t *testing.T, port int) *HomeKitManager {
 	t.Helper()
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: port, Store: t.TempDir()}
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off})
+	// nil bell/snapshot: bridge only, so these tests bind exactly one port.
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}
+
+	// Confine Bonjour to loopback. These accessories carry the same names
+	// as a real deployment, and a test run must not put a second
+	// "camonitor" bridge on the developer's network for the Home app to
+	// find. (It did, before this line existed.)
+	for _, s := range m.servers {
+		s.srv.Ifaces = []string{loopbackInterface(t)}
+	}
 	return m
+}
+
+func loopbackInterface(t *testing.T) string {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("list interfaces: %v", err)
+	}
+	for _, i := range ifaces {
+		if i.Flags&net.FlagLoopback != 0 {
+			return i.Name
+		}
+	}
+	t.Fatal("no loopback interface")
+	return ""
 }
 
 func TestBridgeServesAndStopsWithContext(t *testing.T) {

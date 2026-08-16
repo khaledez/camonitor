@@ -374,7 +374,7 @@ func main() {
 	events := NewEventAttachClient(doorStreams(cfg.Streams), bell)
 	go events.Run(ctx)
 
-	homekit := startHomeKit(ctx, cfg, doors, greeCtrl)
+	homekit := newHomeKit(cfg, doors, greeCtrl, bell, snapFetch)
 
 	// Every observer is registered by now, so start polling the AC.
 	if greeCtrl != nil {
@@ -445,6 +445,13 @@ func main() {
 
 	serverErr := make(chan error, 2)
 	var wg sync.WaitGroup
+
+	// Joined rather than fired and forgotten: shutdown has to outlive
+	// hap's dnssd goodbye records, or the accessory lingers in the Home
+	// app until its mDNS record ages out.
+	if homekit != nil {
+		wg.Go(func() { homekit.Run(ctx) })
+	}
 
 	wg.Go(func() {
 		log.Printf("camonitor HTTP listening on %s with %d stream(s)", cfg.Listen, len(cfg.Streams))

@@ -1,7 +1,8 @@
 # HomeKit support for camonitor
 
-Status: approved 2026-08-16. Phase 1 implements the bridge; phase 2 adds
-camera and doorbell accessories.
+Status: approved 2026-08-16. Phase 1 (the bridge) shipped in v0.8.0 and
+is verified on hardware. Phase 2 (camera and doorbell accessories) is
+implemented; its streaming half is not yet hardware-verified.
 
 ## Goal
 
@@ -74,8 +75,8 @@ reality as part of this work.
 | `hkbridge.go` | Phase 1 accessories: the two locks and the AC, bound to `DoorClient` and `GreeController` |
 | `hklock.go` | Lock state machine (relock timer), clock-injectable |
 | `hkclimate.go` | Gree ↔ HeaterCooler characteristic mapping, both directions |
-| `hkcamera.go` | Phase 2: doorbell + camera accessory, snapshot serving, stream negotiation |
-| `hksrtp.go` | Phase 2: RTSP → SRTP forwarder |
+| `hkcamera.go` | Doorbell + camera accessory, snapshot serving, stream negotiation |
+| `hksrtp.go` | RTSP → SRTP forwarder |
 
 `door.go`, `gree.go`, `bell.go`, and `rtsp.go` keep their current shape.
 `GreeController` gains exported `Status()`, `Set(ctx, params)` and
@@ -291,7 +292,7 @@ type, and sequence numbers on each H.264 RTP packet, encrypts with
 `pion/srtp/v3`, and sends UDP to the iOS endpoint. `pion/srtp/v3` is
 already in the dependency graph via `pion/webrtc`.
 
-Two known sharp edges:
+Three known sharp edges:
 
 - iOS rejects a camera accessory that advertises no audio codec. We
   advertise Opus in `SupportedAudioStreamConfiguration` and never send
@@ -300,6 +301,18 @@ Two known sharp edges:
   latency is bounded by the camera's own IDR interval, and a stalled
   stream is recovered by tearing down and re-opening the RTSP session
   rather than by requesting a keyframe.
+- The camera packetises to its own MTU, which may exceed the one iOS
+  negotiates. Re-fragmenting H.264 FU-A units is the proper fix; for now
+  an oversized packet is logged once per stream and passed through, since
+  in practice camera packets sit under a normal 1500-byte path MTU. This
+  is the most likely thing to need attention on real hardware.
+
+The camera's SSRC, payload type and sequence numbering are all rewritten
+onto the negotiated values. The first two because HomeKit rejects anything
+it did not negotiate; the third because SRTP's replay window needs a
+sequence space we control rather than one that jumps whenever the camera
+reconnects. Timestamps pass through — RTSP H.264 and HomeKit both clock
+video at 90 kHz.
 
 ## Failure behaviour
 
@@ -329,12 +342,26 @@ to pure logic with no network and no hardware:
 - Setup-code validation, including Apple's rejected codes.
 - Temperature round-trips through both Celsius and Fahrenheit units, and
   an offline poll leaving the last known values in place.
-- Phase 2: TLV round-trips for `SetupEndpoints` and
-  `SelectedStreamConfiguration`, and the RTP header rewrite against a
-  golden packet.
+- The SRTP forwarder end to end: packets shaped like the camera's go in,
+  and a real UDP listener decrypts them with the key HomeKit would have
+  supplied, asserting the SSRC, payload type, contiguous sequence and
+  passed-through timestamp. This is as close to an iPhone as the suite
+  gets, and it covers the part that cannot otherwise be checked without
+  one.
+- Camera accessory shape (category, doorbell primary, one stream
+  management per simultaneous viewer, the muted microphone iOS requires),
+  and that a ring fires only its own camera's doorbell.
+- Manager topology: bridge plus one camera server per door station on
+  ascending ports, each with a distinct setup payload, and the setup code
+  surviving until every accessory is paired rather than only the bridge.
 
 `DoorClient` and `GreeController` are consumed through narrow interfaces
 at the HomeKit boundary so tests use fakes.
+
+The live tier confines its Bonjour announcements to loopback. Its
+accessories carry production names, and a test run must not put a second
+"camonitor" bridge on the developer's network — which it did, once,
+before that was fixed.
 
 Mocking the store is not sufficient on its own. It hid a real defect —
 that a `hap.Server` cannot be restarted — so a second, smaller tier of

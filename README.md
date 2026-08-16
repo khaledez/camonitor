@@ -295,6 +295,12 @@ headless setup.
 
 What you get:
 
+- **A video doorbell per door station** — camera plus doorbell, each its
+  own accessory on the port above the bridge (51827, 51828). A bell press
+  raises a HomeKit notification carrying the snapshot the camera took at
+  that instant, and live view streams H.264 straight from the camera over
+  SRTP with no transcoding. Add them from the Home app after the bridge is
+  paired; they use the same setup code.
 - **One lock per door station** (every stream with `"door": true`). The
   Dahua relay is a momentary pulse and reports no state, so the lock shows
   Unsecured for `relock_after` and then returns to Secured. A failed open
@@ -316,6 +322,15 @@ Notes:
   the LAN force the bridge back into a pairable state. For the same reason
   the setup code and its QR stop being served once pairing completes. If
   the pairing store is ever wedged, delete `store` and restart.
+- Put each doorbell and its lock in the **same room** in the Home app.
+  The camera's live view offers controls for accessories sharing its room,
+  which is what puts an unlock button on the doorbell notification.
+- Live view opens the camera's sub stream for small requests and the main
+  stream at 720p and above. Each simultaneous viewer costs one more RTSP
+  session to that camera; two are allowed per camera.
+- No two-way audio. HomeKit requires a camera to advertise an audio codec,
+  so one is declared and a muted microphone is present, but camonitor
+  sends no audio and ignores any it receives.
 - In **Auto** mode the Home app draws a temperature *range*, but the Gree
   has a single set point, so both ends track it and the band collapses to
   a point. Heat and Cool show one target and behave normally.
@@ -325,10 +340,9 @@ Notes:
 - Discovery uses mDNS on UDP/5353. Under `--network host` (or
   `hostNetwork: true`) that is the host's port — if something else on the
   host already binds it, the Home app will not find the bridge.
-- Cameras are **not** here yet. HomeKit refuses to bridge cameras and
-  requires H.264 over SRTP, so they need their own pairable accessories;
-  that is phase 2. The Tiandy units stream H.265 and will stay web-UI-only
-  unless they can be reconfigured to emit H.264.
+- The Tiandy units stream H.265, which HomeKit will not take, so they
+  stay web-UI-only unless they can be reconfigured to emit H.264 on
+  `stream2`.
 - HomeKit Secure Video is out of scope. Recording stays in the web UI and
   WhatsApp paths.
 
