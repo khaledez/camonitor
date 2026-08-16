@@ -25,6 +25,13 @@ standalone — each one pairs separately. Homebridge solves this with
 individually in the Home app; camonitor does the same. One code, three
 "Add Accessory" taps.
 
+Sharing the *code* does not mean sharing a *QR*. Each accessory has its
+own setup id, and HomeKit matches a scanned payload by that id, so the
+bridge's QR can only ever add the bridge. This was learned the hard way:
+the first release served a single QR, and scanning it simply re-added the
+bridge while the two doorbells stayed unpairable. The panel now shows one
+QR per accessory still to be added.
+
 **HomeKit camera streams are H.264 over SRTP.** The two Tiandy cameras
 (`Front`, `South`) deliver H.265 on both main and sub streams and are
 therefore ineligible without transcoding. Bundling ffmpeg was rejected:
@@ -167,7 +174,7 @@ unpaired.
 New endpoints:
 
 - `GET /homekit/status` → `{"configured":bool,"paired":bool,"accessories":[…]}`, plus `pin` while unpaired
-- `GET /homekit/qr.png` → PNG of the `X-HM://` setup payload, 404 once paired
+- `GET /homekit/qr.png?accessory=<name>` → PNG of that accessory's `X-HM://` payload, 404 once that accessory is paired. Defaults to the bridge.
 
 When `homekit` is absent from config, `/homekit/status` still answers
 `{"configured":false}` so the web UI can render without a conditional

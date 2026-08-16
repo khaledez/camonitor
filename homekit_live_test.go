@@ -142,7 +142,7 @@ func TestSetupCodeIsWithheldOncePaired(t *testing.T) {
 	if st.Pin == "" {
 		t.Error("pin withheld while unpaired; the user cannot pair")
 	}
-	if code := recordQR(t, m).Code; code != 200 {
+	if code := recordQR(t, m, "").Code; code != 200 {
 		t.Errorf("qr.png = %d while unpaired, want 200", code)
 	}
 
@@ -158,7 +158,7 @@ func TestSetupCodeIsWithheldOncePaired(t *testing.T) {
 	if st.Pin != "" {
 		t.Errorf("pin %q served after pairing; it grants door-lock control", st.Pin)
 	}
-	if code := recordQR(t, m).Code; code != 404 {
+	if code := recordQR(t, m, "").Code; code != 404 {
 		t.Errorf("qr.png = %d after pairing, want 404", code)
 	}
 }
@@ -173,9 +173,15 @@ func decodeStatus(t *testing.T, m *HomeKitManager, out *HomeKitStatus) {
 	}
 }
 
-func recordQR(t *testing.T, m *HomeKitManager) *httptest.ResponseRecorder {
+// recordQR fetches the QR for a named accessory; an empty name exercises
+// the default (bridge) path.
+func recordQR(t *testing.T, m *HomeKitManager, accessory string) *httptest.ResponseRecorder {
 	t.Helper()
+	url := "/homekit/qr.png"
+	if accessory != "" {
+		url += "?accessory=" + accessory
+	}
 	rec := httptest.NewRecorder()
-	m.HandleQR(rec, httptest.NewRequest(http.MethodGet, "/homekit/qr.png", nil))
+	m.HandleQR(rec, httptest.NewRequest(http.MethodGet, url, nil))
 	return rec
 }

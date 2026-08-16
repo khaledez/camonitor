@@ -288,10 +288,19 @@ conditioner to the Apple Home app:
 | `store` | no | Directory for pairing state. Defaults to `/var/lib/camonitor/homekit`. Put it on the same persistent volume as `wa.db` so pairing survives restarts. |
 | `relock_after` | no | How long a lock reports Unsecured after a successful open. Defaults to `5s`. |
 
-A 🏠 button appears in the header. Open it, then in the Home app tap
-**+ → Add Accessory** and scan the QR. The same code is printed to stdout
-as an ASCII QR while unpaired, so `docker logs -f camonitor` works for a
-headless setup.
+A 🏠 button appears in the header. It shows **one QR per accessory still
+to be added** — the bridge and each video doorbell. In the Home app tap
+**+ → Add Accessory** and scan them one at a time.
+
+They must be separate scans. Every accessory shares the setup code but has
+its own *setup id*, and HomeKit matches a scanned payload by that id, so
+the bridge's QR only ever adds the bridge. A QR disappears once its
+accessory is paired.
+
+The same codes are printed to stdout as ASCII QRs while unpaired, so
+`docker logs -f camonitor` works for a headless setup. Any accessory can
+also be added without scanning: **+ → Add Accessory → More options…**,
+pick it from the list, and enter the code by hand.
 
 What you get:
 
@@ -299,8 +308,7 @@ What you get:
   own accessory on the port above the bridge (51827, 51828). A bell press
   raises a HomeKit notification carrying the snapshot the camera took at
   that instant, and live view streams H.264 straight from the camera over
-  SRTP with no transcoding. Add them from the Home app after the bridge is
-  paired; they use the same setup code.
+  SRTP with no transcoding. Each is added separately, with its own QR.
 - **One lock per door station** (every stream with `"door": true`). The
   Dahua relay is a momentary pulse and reports no state, so the lock shows
   Unsecured for `relock_after` and then returns to Secured. A failed open

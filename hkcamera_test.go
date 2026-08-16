@@ -168,7 +168,7 @@ func TestSetupCodeSurvivesUntilEveryAccessoryIsPaired(t *testing.T) {
 	if st.Pin != "" {
 		t.Errorf("setup code %q still served after setup completed", st.Pin)
 	}
-	if code := recordQR(t, m).Code; code != 404 {
+	if code := recordQR(t, m, "").Code; code != 404 {
 		t.Errorf("qr.png = %d after setup completed, want 404", code)
 	}
 }
@@ -181,4 +181,72 @@ func streamConfigFor(width, height uint16) (cfg rtp.StreamConfiguration) {
 	cfg.Video.RTP.PayloadType = 99
 	cfg.Video.RTP.MTU = 1378
 	return cfg
+}
+
+// Each accessory needs its own QR: they share a setup code but not a setup
+// id, and HomeKit matches a scanned payload by the latter. Serving one
+// shared QR is what left the doorbells unpairable — scanning it just found
+// the bridge again.
+func TestEachAccessoryServesItsOwnQR(t *testing.T) {
+	bell, fetch := testBellBus(t)
+	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
+
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	if err != nil {
+		t.Fatalf("NewHomeKitManager: %v", err)
+	}
+
+	seen := map[string]string{}
+	for _, s := range m.servers {
+		rec := recordQR(t, m, s.name)
+		if rec.Code != 200 {
+			t.Fatalf("qr for %q = %d, want 200", s.name, rec.Code)
+		}
+		body := rec.Body.String()
+		if other, dup := seen[body]; dup {
+			t.Errorf("%q and %q serve an identical QR; one of them cannot be added", s.name, other)
+		}
+		seen[body] = s.name
+	}
+
+	if got := recordQR(t, m, "NoSuchAccessory").Code; got != 404 {
+		t.Errorf("qr for an unknown accessory = %d, want 404", got)
+	}
+}
+
+// Pairing one accessory must not take the others' codes away — that is the
+// whole point of the per-accessory split.
+func TestPairingOneAccessoryLeavesTheOthersPairable(t *testing.T) {
+	bell, fetch := testBellBus(t)
+	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
+
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	if err != nil {
+		t.Fatalf("NewHomeKitManager: %v", err)
+	}
+
+	bridge := m.servers[0]
+	if err := bridge.store.Set("controller.pairing", []byte("{}")); err != nil {
+		t.Fatalf("seed pairing: %v", err)
+	}
+
+	if got := recordQR(t, m, bridge.name).Code; got != 404 {
+		t.Errorf("qr for the paired bridge = %d, want 404", got)
+	}
+	for _, s := range m.servers[1:] {
+		if got := recordQR(t, m, s.name).Code; got != 200 {
+			t.Errorf("qr for still-unpaired %q = %d, want 200", s.name, got)
+		}
+	}
+
+	var st HomeKitStatus
+	decodeStatus(t, m, &st)
+	if st.Accessories[0].Paired != true {
+		t.Error("bridge not reported as paired")
+	}
+	for _, a := range st.Accessories[1:] {
+		if a.Paired {
+			t.Errorf("%q reported paired when it is not", a.Name)
+		}
+	}
 }

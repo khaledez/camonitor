@@ -288,6 +288,9 @@
     width: 200px; height: 200px; image-rendering: pixelated;
     background: #fff; padding: 8px; border-radius: 4px;
   }
+  #homekit .qr-name {
+    font-size: 13px; font-weight: 600; color: #d6d6d6; margin-bottom: 6px;
+  }
   #homekit .code {
     margin-top: 8px; font-size: 22px; font-weight: 600; letter-spacing: 2px;
     font-variant-numeric: tabular-nums; color: #d6d6d6;
@@ -408,18 +411,17 @@
     <div class="section">
       <div id="hk-state">loading…</div>
     </div>
-    <div class="section qr-wrap" id="hk-qr-wrap">
-      <img id="hk-qr" alt="HomeKit setup code" />
-      <div class="code" id="hk-code">–</div>
-      <div class="hint">
-        Home app → <b>+</b> → Add Accessory → scan this code.<br>
+    <div class="section" id="hk-pending">
+      <div class="hint" style="margin-top:0;">
+        Each accessory pairs separately and needs <b>its own</b> code below.
+        Home app → <b>+</b> → Add Accessory → scan.<br>
         Your iPhone must be on the same network as camonitor.
       </div>
     </div>
     <div class="section">
       <ul class="accessories" id="hk-accessories"></ul>
       <div class="hint" id="hk-paired-hint" hidden>
-        To remove or re-pair, delete the accessory in the Home app.
+        All paired. To remove or re-pair, delete the accessory in the Home app.
       </div>
     </div>
   </div>
@@ -1140,9 +1142,7 @@ refreshAC().then(() => { if (!climateToggle.hidden) startACPolling(); });
 const hkEl = document.getElementById('homekit');
 const hkToggle = document.getElementById('homekit-toggle');
 const hkState = document.getElementById('hk-state');
-const hkQR = document.getElementById('hk-qr');
-const hkCode = document.getElementById('hk-code');
-const hkQRWrap = document.getElementById('hk-qr-wrap');
+const hkPending = document.getElementById('hk-pending');
 const hkAccessories = document.getElementById('hk-accessories');
 const hkPairedHint = document.getElementById('hk-paired-hint');
 
@@ -1159,40 +1159,63 @@ async function refreshHomeKit() {
   hkToggle.hidden = false;
   hkToggle.classList.toggle('unpaired', !st.paired);
 
+  const accessories = st.accessories || [];
+  const pending = accessories.filter(a => !a.paired);
+
   hkState.innerHTML = st.paired
     ? '<span class="pill paired">paired</span>'
-    : '<span class="pill unpaired">not paired</span>';
+    : '<span class="pill unpaired">' + pending.length + ' still to add</span>';
 
-  // The server withholds the setup code once paired — it's a permanent
-  // credential for the door locks — so the QR section goes away with it.
-  hkQRWrap.hidden = st.paired;
+  // One QR per unpaired accessory. They share a setup code but not a
+  // setup id, and HomeKit matches a scanned payload by the latter — so
+  // the bridge's code can only ever add the bridge.
+  renderPendingQRs(pending);
   hkPairedHint.hidden = !st.paired;
-  hkCode.textContent = st.pin || '';
 
   hkAccessories.replaceChildren();
-  for (const a of st.accessories || []) {
+  for (const a of accessories) {
     const li = document.createElement('li');
     const name = document.createElement('span');
     name.textContent = a.name;
     const count = document.createElement('span');
     count.className = 'count';
-    count.textContent = a.controllers === 1 ? '1 controller' : a.controllers + ' controllers';
+    count.textContent = a.paired
+      ? (a.controllers === 1 ? '1 controller' : a.controllers + ' controllers')
+      : 'not added';
     li.append(name, count);
     hkAccessories.append(li);
   }
 }
 
-// Cache-busted so the browser doesn't keep showing a QR the server has
-// since stopped serving.
-function reloadHomeKitQR() {
-  hkQR.src = '/homekit/qr.png?t=' + Date.now();
+// renderPendingQRs rebuilds the QR list, keeping the intro hint that is
+// the first child of the section.
+function renderPendingQRs(pending) {
+  while (hkPending.children.length > 1) hkPending.lastChild.remove();
+  hkPending.hidden = pending.length === 0;
+
+  for (const a of pending) {
+    const wrap = document.createElement('div');
+    wrap.className = 'qr-wrap';
+    wrap.style.marginTop = '14px';
+
+    const label = document.createElement('div');
+    label.className = 'qr-name';
+    label.textContent = a.name;
+
+    const img = document.createElement('img');
+    img.alt = 'HomeKit setup code for ' + a.name;
+    img.src = '/homekit/qr.png?accessory=' + encodeURIComponent(a.name) + '&t=' + Date.now();
+
+    wrap.append(label, img);
+    hkPending.append(wrap);
+  }
 }
 
 hkToggle.addEventListener('click', () => {
   const opening = !hkEl.classList.contains('open');
   hkEl.classList.toggle('open');
   hkEl.setAttribute('aria-hidden', !opening);
-  if (opening) { reloadHomeKitQR(); refreshHomeKit(); }
+  if (opening) refreshHomeKit();
 });
 function closeHomeKit() {
   hkEl.classList.remove('open');
