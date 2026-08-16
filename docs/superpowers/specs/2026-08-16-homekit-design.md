@@ -181,14 +181,17 @@ One `HeaterCooler` service, mapped against the existing `GreeStatus`:
 | `CurrentHeaterCoolerState` | `Power` + `Mode` | inactive / idle / heating / cooling |
 | `CoolingThresholdTemperature` | `SetTemp` | a write to either threshold sets `temp` |
 | `HeatingThresholdTemperature` | `SetTemp` | |
-| `RotationSpeed` | `FanSpeed` | 20/40/60/80/100 ↔ 1–5, `minStep` 20 |
-| `SwingMode` | `SwingV` | disabled ↔ 0, enabled ↔ 1 |
+| `RotationSpeed` | `FanSpeed` | 0–100 in steps of 20 ↔ 0–5, so 0% is Gree's fan-auto |
+| `SwingMode` | `SwingV` | disabled ↔ 0, enabled ↔ `SwUpDn` 1 (full swing); the fixed louvre positions 2–6 have no binary equivalent and read as disabled |
 | `TemperatureDisplayUnits` | `TempUnit` | |
 
-Deliberately omitted: Gree's fan-auto (`FanSpeed 0`) has no honest
-HomeKit representation because `RotationSpeed 0` reads as "off", so it
-stays web-UI-only; `Turbo`, `Quiet`, `Health`, `Sleep`, `Air`,
-`EnergySave`, and `Light` are out of scope.
+Fan-auto keeps Gree's own encoding rather than being dropped: HomeKit has
+no separate auto setting for a thermostat's fan, and inventing a
+percentage for it would round-trip into an explicit speed the user never
+chose. It costs one line in the README.
+
+Deliberately omitted: `Turbo`, `Quiet`, `Health`, `Sleep`, `Air`,
+`EnergySave`, and `Light`.
 
 Two `Switch` services, `AC Dry` and `AC Fan Only`, cover the modes
 HeaterCooler cannot express. They are mutually exclusive: turning one on

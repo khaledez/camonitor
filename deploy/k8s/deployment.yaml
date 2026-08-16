@@ -68,6 +68,12 @@ spec:
             - name: sip
               containerPort: 5060
               protocol: UDP
+            # HomeKit. The bridge listens on 51826; camera accessories
+            # (phase 2) take the ports above it. Bonjour discovery rides
+            # the node's UDP/5353 via hostNetwork — nothing else on this
+            # node may bind it, or the Home app will not see the bridge.
+            - name: homekit
+              containerPort: 51826
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -140,6 +140,7 @@ type Config struct {
 	SIP      SIPConfig       `json:"sip"`
 	WhatsApp *WhatsAppConfig `json:"whatsapp,omitempty"`
 	Gree     *GreeConfig     `json:"gree,omitempty"`
+	HomeKit  *HomeKitConfig  `json:"homekit,omitempty"`
 	Streams  []StreamConfig  `json:"streams"`
 	// Timezone names the IANA zone used when rendering wall-clock times
 	// for outbound notifications (e.g. the WhatsApp caption). The browser
@@ -299,6 +300,14 @@ func main() {
 
 	doors := NewDoorClient(cfg.Streams)
 
+	// Built here rather than at mux-registration time because HomeKit
+	// needs it too. Polling starts further down, once every observer has
+	// registered.
+	var greeCtrl *GreeController
+	if cfg.Gree != nil {
+		greeCtrl = NewGreeController(*cfg.Gree)
+	}
+
 	// WhatsApp is optional; nil sender means "skip the WA leg". The
 	// snapshot fetcher is unconditional — every bell event tries to grab
 	// a JPEG so the cached /snapshot endpoint always has the latest frame.
@@ -365,6 +374,13 @@ func main() {
 	events := NewEventAttachClient(doorStreams(cfg.Streams), bell)
 	go events.Run(ctx)
 
+	homekit := startHomeKit(ctx, cfg, doors, greeCtrl)
+
+	// Every observer is registered by now, so start polling the AC.
+	if greeCtrl != nil {
+		go greeCtrl.Run(ctx)
+	}
+
 	staticFS, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatalf("embed: %v", err)
@@ -383,9 +399,7 @@ func main() {
 	// Gree climate control is optional; nil config means "skip". When
 	// absent we still mount a static "not configured" status endpoint so
 	// the web UI can hide the climate panel without a 404.
-	if cfg.Gree != nil {
-		greeCtrl := NewGreeController(*cfg.Gree)
-		go greeCtrl.Run(ctx)
+	if greeCtrl != nil {
 		mux.HandleFunc("/gree/status", greeCtrl.HandleStatus)
 		mux.HandleFunc("/gree/set", greeCtrl.HandleSet)
 	} else {
@@ -395,6 +409,14 @@ func main() {
 			_, _ = w.Write([]byte(`{"configured":false}`))
 		})
 	}
+	if homekit != nil {
+		mux.HandleFunc("/homekit/status", homekit.HandleStatus)
+		mux.HandleFunc("/homekit/qr.png", homekit.HandleQR)
+		mux.HandleFunc("/homekit/unpair", homekit.HandleUnpair)
+	} else {
+		mux.HandleFunc("/homekit/status", handleHomeKitDisabled)
+	}
+
 	if waClient != nil {
 		mux.HandleFunc("/wa/status", waClient.HandleStatus)
 		mux.HandleFunc("/wa/qr.png", waClient.HandleQR)

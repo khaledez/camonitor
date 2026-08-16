@@ -30,6 +30,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -61,6 +62,19 @@ func (g GreeConfig) port() int {
 	}
 	return g.Port
 }
+
+// Operating modes as encoded by the Gree protocol's "Mod" column.
+const (
+	greeModeAuto = 0
+	greeModeCool = 1
+	greeModeDry  = 2
+	greeModeFan  = 3
+	greeModeHeat = 4
+)
+
+// greeFanAuto is the "Wd Spd" value meaning "let the unit pick"; 1..5 are
+// the explicit speeds from lowest to highest.
+const greeFanAuto = 0
 
 // GreeStatus is the decoded, human-friendly view of a unit's state. Values
 // follow the Gree protocol (see README): Power 0/1, Mode 0=auto 1=cool
@@ -429,8 +443,9 @@ type GreeController struct {
 	client *greeClient
 	name   string
 
-	mu     sync.Mutex
-	status GreeStatus
+	mu        sync.Mutex
+	status    GreeStatus
+	observers []func(GreeStatus)
 }
 
 func NewGreeController(cfg GreeConfig) *GreeController {
@@ -464,24 +479,53 @@ func (g *GreeController) refresh(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, greeStatusTimeout)
 	defer cancel()
 	st := g.client.Status(ctx)
+	st.Name = g.name
+
 	g.mu.Lock()
 	g.status = st
+	observers := slices.Clone(g.observers)
 	g.mu.Unlock()
+
+	for _, fn := range observers {
+		fn(st)
+	}
 }
 
-func (g *GreeController) current() GreeStatus {
+// Name is the unit's display label, falling back to its host.
+func (g *GreeController) Name() string { return g.name }
+
+// Status returns the most recent poll result.
+func (g *GreeController) Status() GreeStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.status
+}
+
+// Set applies params and re-reads the unit so callers see the result
+// rather than what they asked for. Params use the friendly names from
+// greeColumnFor, e.g. {"power":1,"mode":1,"temp":24,"fan":3}.
+func (g *GreeController) Set(ctx context.Context, params map[string]int) error {
+	if err := g.client.Set(ctx, params); err != nil {
+		return err
+	}
+	g.refresh(context.WithoutCancel(ctx))
+	return nil
+}
+
+// OnUpdate registers fn to be called after every poll. HomeKit uses this
+// to push characteristic events, so Home app tiles reflect changes made
+// from the physical remote or the web UI.
+func (g *GreeController) OnUpdate(fn func(GreeStatus)) {
+	g.mu.Lock()
+	g.observers = append(g.observers, fn)
+	g.mu.Unlock()
 }
 
 // HandleStatus serves GET /gree/status.
 func (g *GreeController) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	st := g.current()
-	st.Name = g.name
-	_ = json.NewEncoder(w).Encode(st)
+	_ = json.NewEncoder(w).Encode(g.Status())
 }
 
 // HandleSet serves POST /gree/set with a JSON body of friendly params,
@@ -497,14 +541,11 @@ func (g *GreeController) HandleSet(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), greeStatusTimeout)
 	defer cancel()
-	if err := g.client.Set(ctx, params); err != nil {
+	if err := g.Set(ctx, params); err != nil {
 		log.Printf("gree set %v: %v", params, err)
 		http.Error(w, "command failed", http.StatusBadGateway)
 		return
 	}
 	log.Printf("gree set: %v", params)
-	// Refresh promptly so the UI reflects the change without waiting for
-	// the next poll tick.
-	g.refresh(context.Background())
 	w.WriteHeader(http.StatusNoContent)
 }

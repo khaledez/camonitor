@@ -4,8 +4,12 @@ Bridge multiple Dahua VTO (or other RTSP) cameras into a single WebRTC web
 page, with a per-stream HD/SD toggle, a one-click door-unlock button, and
 an optional Gree Wi-Fi air-conditioner monitoring/control panel.
 
-The whole server is one static Go binary. The only third-party Go dependency
-is [pion/webrtc](https://github.com/pion/webrtc); the RTSP client is hand-
+It also bridges the doors and the air conditioner into Apple HomeKit, so
+they can be controlled from the iPhone Home app and Siri.
+
+The whole server is one static Go binary. WebRTC comes from
+[pion](https://github.com/pion/webrtc) and HomeKit from
+[brutella/hap](https://github.com/brutella/hap); the RTSP client is hand-
 rolled in `rtsp.go` (RTSP-over-TCP, HTTP-Digest, single H.264 or H.265
 media) and the Gree client is hand-rolled in `gree.go` (AES-128-ECB
 JSON-over-UDP on port 7000).
@@ -260,6 +264,65 @@ Backend endpoints: `GET /gree/status` returns the current state;
 `POST /gree/set` applies one or more params (e.g. `{"power":1,"mode":1,
 "temp":24,"fan":3}`). The server scans, binds, and caches the unit's
 per-device AES key automatically.
+
+## HomeKit
+
+Add an optional `homekit` block to expose the door stations and the air
+conditioner to the Apple Home app:
+
+```json
+{
+  "homekit": {
+    "pin": "031-45-154",
+    "port": 51826,
+    "store": "/var/lib/camonitor/homekit",
+    "relock_after": "5s"
+  }
+}
+```
+
+| field | required | meaning |
+| ----- | -------- | ------- |
+| `pin` | yes | Setup code, with or without dashes. Fixed in config so wiping the pairing store doesn't change the code you wrote down. Apple rejects trivial codes (`111-11-111`, `123-45-678`, …) and so does camonitor, at startup. |
+| `port` | no | Bridge TCP port. Defaults to 51826. |
+| `store` | no | Directory for pairing state. Defaults to `/var/lib/camonitor/homekit`. Put it on the same persistent volume as `wa.db` so pairing survives restarts. |
+| `relock_after` | no | How long a lock reports Unsecured after a successful open. Defaults to `5s`. |
+
+A 🏠 button appears in the header. Open it, then in the Home app tap
+**+ → Add Accessory** and scan the QR. The same code is printed to stdout
+as an ASCII QR while unpaired, so `docker logs -f camonitor` works for a
+headless setup.
+
+What you get:
+
+- **One lock per door station** (every stream with `"door": true`). The
+  Dahua relay is a momentary pulse and reports no state, so the lock shows
+  Unsecured for `relock_after` and then returns to Secured. A failed open
+  shows as Jammed rather than silently succeeding.
+- **The air conditioner** as a thermostat tile: power, room temperature,
+  set point, heat/cool/auto, fan speed and swing. Gree's dry and fan-only
+  modes have no HomeKit equivalent, so they get their own **AC Dry** and
+  **AC Fan Only** switches on the same accessory. Fan speed maps
+  20/40/60/80/100% to Gree's speeds 1–5; **0% is Gree's fan-auto**, since
+  HomeKit has no separate auto setting for a thermostat's fan.
+
+Notes:
+
+- Pairing is LAN-only; Bonjour does not cross the tailnet. Away-from-home
+  control needs an Apple Home hub (Apple TV or HomePod) on the same
+  network. The tailnet web UI remains the fallback.
+- Discovery uses mDNS on UDP/5353. Under `--network host` (or
+  `hostNetwork: true`) that is the host's port — if something else on the
+  host already binds it, the Home app will not find the bridge.
+- Cameras are **not** here yet. HomeKit refuses to bridge cameras and
+  requires H.264 over SRTP, so they need their own pairable accessories;
+  that is phase 2. The Tiandy units stream H.265 and will stay web-UI-only
+  unless they can be reconfigured to emit H.264.
+- HomeKit Secure Video is out of scope. Recording stays in the web UI and
+  WhatsApp paths.
+
+The design is written up in
+[`docs/superpowers/specs/2026-08-16-homekit-design.md`](docs/superpowers/specs/2026-08-16-homekit-design.md).
 
 ## Run from source
 

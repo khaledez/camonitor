@@ -15,6 +15,12 @@
     "port": 7000,
     "name": "Living Room AC"
   },
+  "homekit": {
+    "pin": "031-45-154",
+    "port": 51826,
+    "store": "/var/lib/camonitor/homekit",
+    "relock_after": "5s"
+  },
   "streams": [
     {
       "id": "vto1",
