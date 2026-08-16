@@ -3,23 +3,24 @@
 // The VTO exposes a momentary relay and reports no lock state at all —
 // there is no magnetic contact to read back. So LockCurrentState here is
 // inferred rather than sensed: Unsecured immediately after a successful
-// open, back to Secured once relockAfter elapses. A failed open reports
-// Jammed before settling back to Secured, because a tile that always
-// claims success is worse than no tile.
+// open, back to Secured once relockAfter elapses.
+//
+// A failed open is reported by failing the write, which is all HomeKit
+// gives us. Setting LockCurrentState to Jammed alongside it looks
+// tempting, but hap maps any handler error to SERVICE_COMMUNICATION_
+// FAILURE and the Home app renders that as "No Response" — the Jammed
+// value never surfaces, so it would be decoration that also lies about
+// why the command failed.
 package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/brutella/hap/characteristic"
 	"github.com/brutella/hap/service"
 )
-
-// jamDisplayTime is how long a failed unlock shows as Jammed before the
-// tile settles back to Secured. Long enough to notice, short enough that
-// the accessory does not look stuck.
-const jamDisplayTime = 3 * time.Second
 
 // doorOpener is the slice of DoorClient this accessory needs. Narrowing it
 // keeps the tests free of HTTP and cameras.
@@ -44,10 +45,14 @@ type hkLock struct {
 
 	svc *service.LockMechanism
 
-	// cancelPending stops the in-flight relock timer. Only ever touched
-	// from HomeKit write handlers, which the HAP server serialises per
-	// connection; the timer callback deliberately does not clear it, so
-	// cancelling an already-fired timer stays a harmless no-op.
+	// mu guards cancelPending. hap dispatches writes on the goroutine of
+	// whichever connection made them, and a household normally has several
+	// paired controllers (iPhone, iPad, Home hub) each on their own
+	// connection — so two unlocks really can land at once.
+	mu sync.Mutex
+	// cancelPending stops the in-flight relock timer. The timer callback
+	// deliberately does not clear it, so cancelling an already-fired timer
+	// stays a harmless no-op.
 	cancelPending func()
 }
 
@@ -85,8 +90,6 @@ func (l *hkLock) unlock() error {
 	defer cancel()
 
 	if err := l.doors.Open(ctx, l.streamID); err != nil {
-		l.svc.LockCurrentState.SetValue(characteristic.LockCurrentStateJammed)
-		l.scheduleRelock(jamDisplayTime)
 		return err
 	}
 
@@ -102,10 +105,13 @@ func (l *hkLock) secure() {
 	l.svc.LockCurrentState.SetValue(characteristic.LockCurrentStateSecured)
 }
 
-// scheduleRelock restarts the timer rather than stacking, so repeated
-// unlocks extend the window instead of racing each other back to Secured.
+// scheduleRelock restarts the timer rather than stacking, so concurrent
+// unlocks extend the window instead of one of them slamming the tile back
+// to Secured while another's relay window is still open.
 func (l *hkLock) scheduleRelock(d time.Duration) {
-	l.cancel()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cancelLocked()
 	l.cancelPending = l.timer(d, func() {
 		l.svc.LockCurrentState.SetValue(characteristic.LockCurrentStateSecured)
 		l.svc.LockTargetState.SetValue(characteristic.LockTargetStateSecured)
@@ -113,6 +119,12 @@ func (l *hkLock) scheduleRelock(d time.Duration) {
 }
 
 func (l *hkLock) cancel() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cancelLocked()
+}
+
+func (l *hkLock) cancelLocked() {
 	if l.cancelPending != nil {
 		l.cancelPending()
 		l.cancelPending = nil

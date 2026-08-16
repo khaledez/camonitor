@@ -412,7 +412,6 @@ func main() {
 	if homekit != nil {
 		mux.HandleFunc("/homekit/status", homekit.HandleStatus)
 		mux.HandleFunc("/homekit/qr.png", homekit.HandleQR)
-		mux.HandleFunc("/homekit/unpair", homekit.HandleUnpair)
 	} else {
 		mux.HandleFunc("/homekit/status", handleHomeKitDisabled)
 	}

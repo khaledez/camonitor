@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,9 +37,11 @@ const (
 	defaultHomeKitStore = "/var/lib/camonitor/homekit"
 	defaultRelockAfter  = 5 * time.Second
 
-	// restartBackoff keeps a server that fails to start (port taken,
-	// interface gone) from spinning. Startup already fails fast on a bound
-	// port, so this only covers failures that appear later.
+	// restartBackoff paces retries when the server cannot start — the port
+	// is taken, the interface is gone. Retrying rather than exiting is
+	// deliberate: under hostNetwork any other process on the node can hold
+	// 51826, and HomeKit going missing must not take doors and cameras
+	// down with it.
 	restartBackoff = 5 * time.Second
 )
 
@@ -171,15 +172,22 @@ func setupIDFor(pin, name string) string {
 
 // hkServer is one pairable HomeKit endpoint: the bridge, or (phase 2) a
 // single camera accessory.
+//
+// There is deliberately no "unpair" here. Removing the accessory in the
+// Home app is the supported path and hap handles it properly, including
+// re-advertising as pairable. Doing it ourselves would mean either
+// bouncing the hap.Server — which cannot be restarted, it closes the
+// http.Server it was built with and never rebuilds it — or constructing a
+// second one over the same accessories, which double-registers hap's
+// notification callbacks and duplicates every event to the controller.
+// Recovering a wedged pairing store is an operator job: delete the store
+// directory and restart.
 type hkServer struct {
 	name  string
 	addr  string
 	uri   string // X-HM:// setup payload, pre-rendered for the QR
 	srv   *hap.Server
 	store hap.Store
-
-	mu      sync.Mutex
-	restart context.CancelFunc
 }
 
 // pairedControllers counts stored pairings. hap keeps one file per paired
@@ -193,53 +201,22 @@ func (s *hkServer) pairedControllers() int {
 	return len(keys)
 }
 
-// unpair forgets every controller and bounces the server so it
-// re-advertises as pairable. hap updates its discovery flag only while
-// starting up, so a restart is the only way to make the accessory visible
-// again without restarting the whole process.
-func (s *hkServer) unpair() error {
-	keys, err := s.store.KeysWithSuffix(".pairing")
-	if err != nil {
-		return fmt.Errorf("list pairings: %w", err)
-	}
-	for _, k := range keys {
-		if err := s.store.Delete(k); err != nil {
-			return fmt.Errorf("delete pairing %s: %w", k, err)
-		}
-	}
-
-	s.mu.Lock()
-	restart := s.restart
-	s.mu.Unlock()
-	if restart != nil {
-		restart()
-	}
-	return nil
-}
-
-// run serves until ctx is cancelled, restarting after an unpair.
+// run serves until ctx is cancelled. A bind failure (something else on the
+// host already holds the port) is retried rather than fatal: HomeKit going
+// missing is much cheaper than taking doors and cameras down with it.
 func (s *hkServer) run(ctx context.Context) {
 	for ctx.Err() == nil {
-		runCtx, cancel := context.WithCancel(ctx)
-		s.mu.Lock()
-		s.restart = cancel
-		s.mu.Unlock()
-
-		err := s.srv.ListenAndServe(runCtx)
-		cancel()
-		if ctx.Err() != nil {
+		log.Printf("homekit [%s]: listening on %s", s.name, s.addr)
+		err := s.srv.ListenAndServe(ctx)
+		if ctx.Err() != nil || errors.Is(err, http.ErrServerClosed) {
 			return
 		}
-		if err != nil {
-			log.Printf("homekit [%s]: serve: %v", s.name, err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(restartBackoff):
-			}
-			continue
+		log.Printf("homekit [%s]: %v — retrying in %v", s.name, err, restartBackoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(restartBackoff):
 		}
-		log.Printf("homekit [%s]: restarting (pairings cleared)", s.name)
 	}
 }
 
@@ -269,30 +246,27 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 	bridge, children, climate := buildBridgeAccessories(streams, doors, gree, relock)
 
 	storeDir := filepath.Join(cfg.store(), "bridge")
-	if err := os.MkdirAll(storeDir, 0o700); err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", errHomeKitStore, storeDir, err)
-	}
-	store := hap.NewFsStore(storeDir)
-
-	// NewServer writes the accessory's uuid and keypair, so a store that
-	// is present but unwritable surfaces here rather than above.
-	srv, err := hap.NewServer(store, bridge, children...)
+	store, err := openPairingStore(storeDir)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errHomeKitStore, err)
+		return nil, err
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.port())
 	setupID := setupIDFor(pin, bridgeName)
+
+	// Exactly one NewServer per accessory tree, ever: it appends a
+	// notification callback to every characteristic, so a second call over
+	// the same accessories makes hap emit each event twice.
+	srv, err := hap.NewServer(store, bridge, children...)
+	if err != nil {
+		return nil, fmt.Errorf("build accessories: %w", err)
+	}
 	srv.Pin = pin
 	srv.Addr = addr
 	srv.SetupId = setupID
 
 	uri, err := setupPayloadURI(pin, accessory.TypeBridge, setupID)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := checkPortFree(addr); err != nil {
 		return nil, err
 	}
 
@@ -308,6 +282,24 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 		qrPNG:   renderQRPNG(uri),
 		climate: climate,
 	}, nil
+}
+
+// openPairingStore creates the store directory and proves it is writable,
+// so an unusable volume is reported as such rather than surfacing later as
+// an opaque hap error that gets misattributed.
+func openPairingStore(dir string) (hap.Store, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", errHomeKitStore, dir, err)
+	}
+	store := hap.NewFsStore(dir)
+	const probe = "camonitor.probe"
+	if err := store.Set(probe, []byte("ok")); err != nil {
+		return nil, fmt.Errorf("%w: %s not writable: %v", errHomeKitStore, dir, err)
+	}
+	if err := store.Delete(probe); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", errHomeKitStore, dir, err)
+	}
+	return store, nil
 }
 
 // startHomeKit builds and starts the bridge when configured, returning nil
@@ -343,16 +335,6 @@ func startHomeKit(ctx context.Context, cfg *Config, doors doorOpener, gree *Gree
 	return m
 }
 
-// checkPortFree fails fast on a port conflict. Half-advertising an
-// accessory that cannot accept connections is worse than not starting.
-func checkPortFree(addr string) error {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("homekit port %s: %w", addr, err)
-	}
-	return ln.Close()
-}
-
 // Climate exposes the climate accessory so main can wire it to the Gree
 // poll. Nil when no air conditioner is configured.
 func (m *HomeKitManager) Climate() *hkClimate { return m.climate }
@@ -363,10 +345,7 @@ func (m *HomeKitManager) Run(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for _, s := range m.servers {
-		wg.Go(func() {
-			log.Printf("homekit [%s]: listening on %s", s.name, s.addr)
-			s.run(ctx)
-		})
+		wg.Go(func() { s.run(ctx) })
 	}
 	wg.Wait()
 }
@@ -383,10 +362,11 @@ func (m *HomeKitManager) printPairingCode() {
 	}
 }
 
-// HomeKitStatus is the JSON shape served to the web UI.
+// HomeKitStatus is the JSON shape served to the web UI. Pin is populated
+// only while the bridge is unpaired — see HandleStatus.
 type HomeKitStatus struct {
 	Configured  bool                  `json:"configured"`
-	Pin         string                `json:"pin"`
+	Pin         string                `json:"pin,omitempty"`
 	Paired      bool                  `json:"paired"`
 	Accessories []HomeKitAccessoryDTO `json:"accessories"`
 }
@@ -396,15 +376,33 @@ type HomeKitAccessoryDTO struct {
 	Controllers int    `json:"controllers"`
 }
 
-// HandleStatus serves GET /homekit/status.
-func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	st := HomeKitStatus{Configured: true, Pin: formatPin(m.pin)}
+// paired reports whether any accessory has at least one controller.
+func (m *HomeKitManager) paired() bool {
 	for _, s := range m.servers {
-		n := s.pairedControllers()
-		if n > 0 {
-			st.Paired = true
+		if s.pairedControllers() > 0 {
+			return true
 		}
-		st.Accessories = append(st.Accessories, HomeKitAccessoryDTO{Name: s.name, Controllers: n})
+	}
+	return false
+}
+
+// HandleStatus serves GET /homekit/status.
+//
+// The setup code is withheld once paired. It is a permanent credential
+// that grants control of the door locks, and this mux has no
+// authentication — the same reasoning that makes /wa/qr.png 404 after
+// pairing, except that here the code never rotates, so withholding it
+// matters more.
+func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
+	st := HomeKitStatus{Configured: true, Paired: m.paired()}
+	if !st.Paired {
+		st.Pin = formatPin(m.pin)
+	}
+	for _, s := range m.servers {
+		st.Accessories = append(st.Accessories, HomeKitAccessoryDTO{
+			Name:        s.name,
+			Controllers: s.pairedControllers(),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -412,11 +410,11 @@ func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
-// HandleQR serves GET /homekit/qr.png — the bridge's setup payload. The
-// camera accessories (phase 2) share this code; the Home app finds them as
-// nearby accessories once the bridge is paired.
+// HandleQR serves GET /homekit/qr.png — the bridge's setup payload, and
+// only while unpaired. The QR encodes the setup code, so serving it after
+// pairing would hand out the same credential HandleStatus withholds.
 func (m *HomeKitManager) HandleQR(w http.ResponseWriter, r *http.Request) {
-	if len(m.qrPNG) == 0 {
+	if len(m.qrPNG) == 0 || m.paired() {
 		http.NotFound(w, r)
 		return
 	}
@@ -424,22 +422,6 @@ func (m *HomeKitManager) HandleQR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(m.qrPNG)))
 	_, _ = w.Write(m.qrPNG)
-}
-
-// HandleUnpair serves POST /homekit/unpair.
-func (m *HomeKitManager) HandleUnpair(w http.ResponseWriter, r *http.Request) {
-	if !requirePost(w, r) {
-		return
-	}
-	for _, s := range m.servers {
-		if err := s.unpair(); err != nil {
-			log.Printf("homekit [%s]: unpair: %v", s.name, err)
-			http.Error(w, "unpair failed", http.StatusInternalServerError)
-			return
-		}
-	}
-	log.Printf("homekit: all pairings cleared")
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleHomeKitDisabled answers the status endpoint when HomeKit is off,

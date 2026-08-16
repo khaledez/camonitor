@@ -70,17 +70,17 @@ reality as part of this work.
 
 | File | Contents |
 | ---- | -------- |
-| `homekit.go` | Config type, server lifecycle, pairing store, QR/status/unpair HTTP handlers |
+| `homekit.go` | Config type, server lifecycle, pairing store, QR/status HTTP handlers |
 | `hkbridge.go` | Phase 1 accessories: the two locks and the AC, bound to `DoorClient` and `GreeController` |
-| `hklock.go` | Lock state machine (relock timer, jam reporting), clock-injectable |
+| `hklock.go` | Lock state machine (relock timer), clock-injectable |
 | `hkclimate.go` | Gree ↔ HeaterCooler characteristic mapping, both directions |
 | `hkcamera.go` | Phase 2: doorbell + camera accessory, snapshot serving, stream negotiation |
 | `hksrtp.go` | Phase 2: RTSP → SRTP forwarder |
 
 `door.go`, `gree.go`, `bell.go`, and `rtsp.go` keep their current shape.
-`GreeController` gains exported `Status()` and `Set(ctx, params)` so
-HomeKit and the web UI share one path into the device rather than
-HomeKit reaching through an HTTP handler.
+`GreeController` gains exported `Status()`, `Set(ctx, params)` and
+`Name()` so HomeKit and the web UI share one path into the device rather
+than HomeKit reaching through an HTTP handler.
 
 ### Accessory topology
 
@@ -128,19 +128,45 @@ Apple rejects a handful of setup codes as too weak (`000-00-000`,
 at startup with a clear message rather than letting pairing fail
 mysteriously later.
 
+### Removal, and why there is no unpair endpoint
+
+Removing the accessory in the Home app is HomeKit's supported path, and
+`hap` handles it correctly including re-advertising as pairable. camonitor
+therefore exposes no unpair of its own. An earlier draft did, and review
+found it caused three separate defects at once:
+
+- A `hap.Server` cannot be restarted — it closes the `http.Server` it was
+  built with and never rebuilds it — so bouncing the accessory left it
+  permanently unreachable until the process restarted.
+- Constructing a second server over the same accessories instead
+  double-registers `hap`'s per-characteristic notification callbacks, so
+  every event reaches the controller twice, accumulating per bounce.
+- The endpoint is unauthenticated like the rest of this mux, so anyone on
+  the LAN could clear pairings and then pair their own device — turning
+  transient LAN access into persistent, remote-capable control of the
+  door locks.
+
+Recovering a wedged pairing store is an operator task: delete the store
+directory and restart.
+
+For the same reason, the setup code and its QR are served **only while
+unpaired**. The code is permanent — unlike the WhatsApp QR, which rotates
+every ~20s and 404s after pairing — so continuing to serve it would hand
+out a durable door-lock credential to anything that can reach port 8080.
+
 ### Pairing UX
 
 A 🏠 button in the web UI header opens a panel mirroring the existing
-WhatsApp one: the `X-HM://` QR code, the setup code as text, the number
-of paired controllers, and an "unpair all" button. The same code is
-printed to stdout as a half-block ASCII QR at startup when unpaired.
+WhatsApp one: the `X-HM://` QR code, the setup code as text, and the
+number of paired controllers. The QR and code disappear once paired. The
+same code is printed to stdout as a half-block ASCII QR at startup when
+unpaired.
 `rsc.io/qr` and `mdp/qrterminal/v3` are already dependencies.
 
 New endpoints:
 
-- `GET /homekit/status` → `{"configured":bool,"paired":bool,"controllers":int,"pin":string}`
-- `GET /homekit/qr.png` → PNG of the `X-HM://` setup payload
-- `POST /homekit/unpair` → removes all pairings, re-enters pairable state
+- `GET /homekit/status` → `{"configured":bool,"paired":bool,"accessories":[…]}`, plus `pin` while unpaired
+- `GET /homekit/qr.png` → PNG of the `X-HM://` setup payload, 404 once paired
 
 When `homekit` is absent from config, `/homekit/status` still answers
 `{"configured":false}` so the web UI can render without a conditional
@@ -158,16 +184,25 @@ so `LockCurrentState` is inferred rather than sensed:
 - A write of `LockTargetState = Unsecured` calls `DoorClient.Open()`.
   On success `LockCurrentState` becomes Unsecured and a `relock_after`
   timer flips both characteristics back to Secured.
-- On failure `LockCurrentState` becomes Jammed (2), then Secured after a
-  short beat. Reporting the failure matters: a tile that always claims
-  success is worse than no tile.
+- On failure the write returns an error and the tile stays Secured.
+  Reporting the failure matters: a tile that always claims success is
+  worse than no tile.
+
+  An earlier draft also set `LockCurrentState = Jammed` here. That was
+  dropped after review: `hap` maps any handler error to
+  `SERVICE_COMMUNICATION_FAILURE`, which the Home app renders as "No
+  Response", so the Jammed value never reaches the user — it would have
+  been decoration that also misdescribed the failure.
 - A write of `LockTargetState = Secured` cancels any pending timer and
   sets Secured immediately. There is no lock command to send; the relay
   only opens.
 
 Concurrent unlocks of the same door restart the timer rather than
-stacking. The state machine takes an injected clock so the timer is
-testable without sleeping.
+stacking, and the timer handle is mutex-guarded: `hap` dispatches writes
+on each connection's own goroutine, and a household normally has several
+paired controllers, so two simultaneous unlocks are ordinary rather than
+exotic. The state machine takes an injected clock so the timer is testable
+without sleeping.
 
 ### Air conditioner
 
@@ -177,6 +212,7 @@ One `HeaterCooler` service, mapped against the existing `GreeStatus`:
 | ---------------------- | ---------- | ----- |
 | `Active` | `Power` | |
 | `CurrentTemperature` | `RoomTemp` | Falls back to `SetTemp` when Gree reports 0 (unit off or no sensor); HomeKit requires a plausible value. |
+| — | `TempUnit` | HAP carries every temperature in Celsius and treats display units as a rendering hint only, so a unit configured in °F has its values converted, not relabelled. |
 | `TargetHeaterCoolerState` | `Mode` | auto ← 0, heat ← 4, cool ← 1 |
 | `CurrentHeaterCoolerState` | `Power` + `Mode` | inactive / idle / heating / cooling |
 | `CoolingThresholdTemperature` | `SetTemp` | a write to either threshold sets `temp` |
@@ -201,12 +237,34 @@ fan-only, `TargetHeaterCoolerState` reports its last heat/cool/auto
 value — lossy, but `Active` still reports power truthfully, which is
 what the tile is judged on.
 
+### Known limitation: Auto mode's temperature range
+
+HomeKit renders `TargetHeaterCoolerState = Auto` as a dual-handle range
+built from the two threshold characteristics. The Gree has one set point,
+so both track it and the band collapses to a point; dragging it snaps
+back. Heat and Cool each show a single target and behave normally.
+
+Accepted rather than fixed. The alternatives — dropping Auto from the
+supported states, or inventing a synthetic band around the set point —
+both misrepresent a unit that genuinely has one target temperature.
+
 ### Freshness
 
 `GreeController.refresh()` already polls every 10s so remote-driven
 changes are visible. It gains a subscription hook that pushes updated
 values into the HomeKit characteristics, so Home app tiles update via
 HAP events rather than only on read.
+
+An offline poll is **not** published. `greeClient.Status` returns a
+zero-valued struct on any failure, so forwarding it would tell every
+controller the AC had switched off at 0 °C — flapping the tile and firing
+any automation keyed on it — every time one UDP exchange timed out. The
+last known state stands until a successful poll replaces it.
+
+HomeKit-initiated writes carry a 9s deadline. iOS abandons a
+characteristic write at around 10s, and it holds a single HAP connection
+per controller for the whole bridge, so an unbounded write to a flaky AC
+would stall reads and writes for the door locks behind it.
 
 ## Phase 2 accessories
 
@@ -250,9 +308,9 @@ Two known sharp edges:
 | `homekit` absent from config | Nothing starts. No behaviour change anywhere else. |
 | Invalid `pin` | Fatal at startup with a message naming the constraint. |
 | Pairing store cannot be opened | HomeKit is disabled with a log line; doors, web UI, WhatsApp, and Gree keep working. Pairing without persistence is worthless, but it is not worth killing the service over. |
-| Port or mDNS conflict | Fatal at startup. Half-advertising is worse than not starting. |
-| Door open fails | `LockCurrentState` → Jammed, then Secured. Logged. |
-| Gree offline | Reads serve last-known values; writes return an error so the Home app shows "No Response" rather than silently accepting. |
+| Port or mDNS conflict | Logged and retried every 5s. Under `hostNetwork` any other process on the node can take 51826, and crash-looping the pod would take doors and cameras down over a HomeKit-only problem. |
+| Door open fails | The write fails, so the Home app reverts the toggle and reports the accessory as not responding. Logged. |
+| Gree offline | Last-known values stand — an offline poll is dropped rather than published. Writes return an error so the Home app shows "No Response" rather than silently accepting. |
 | RTSP session dies mid-stream | SRTP session torn down; iOS shows the stream as ended. |
 
 ## Testing
@@ -264,16 +322,25 @@ to pure logic with no network and no hardware:
   across every mode, fan speed, and the `RoomTemp == 0` fallback. This is
   where the real bugs are expected.
 - Lock state machine: successful open, relock after the configured
-  delay, failure → Jammed → Secured, explicit re-lock cancelling a
-  pending timer, and concurrent opens restarting rather than stacking.
-  Uses an injected clock; no sleeping.
+  delay, a failed open leaving the tile Secured and scheduling nothing,
+  explicit re-lock cancelling a pending timer, and concurrent opens
+  restarting rather than stacking. Uses an injected clock; no sleeping.
+  The concurrency case runs under `-race` and fails without the mutex.
 - Setup-code validation, including Apple's rejected codes.
+- Temperature round-trips through both Celsius and Fahrenheit units, and
+  an offline poll leaving the last known values in place.
 - Phase 2: TLV round-trips for `SetupEndpoints` and
   `SelectedStreamConfiguration`, and the RTP header rewrite against a
   golden packet.
 
 `DoorClient` and `GreeController` are consumed through narrow interfaces
 at the HomeKit boundary so tests use fakes.
+
+Mocking the store is not sufficient on its own. It hid a real defect —
+that a `hap.Server` cannot be restarted — so a second, smaller tier of
+tests binds a real port and drives a real `hap.Server`: the bridge serves
+and stops with its context, a port conflict is retried rather than fatal,
+and the setup code is withheld once paired.
 
 Hardware verification on zima closes each phase: pair from the iPhone,
 confirm all tiles appear, unlock both doors, exercise every AC mode and

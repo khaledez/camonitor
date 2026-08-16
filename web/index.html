@@ -408,7 +408,7 @@
     <div class="section">
       <div id="hk-state">loading…</div>
     </div>
-    <div class="section qr-wrap">
+    <div class="section qr-wrap" id="hk-qr-wrap">
       <img id="hk-qr" alt="HomeKit setup code" />
       <div class="code" id="hk-code">–</div>
       <div class="hint">
@@ -418,9 +418,9 @@
     </div>
     <div class="section">
       <ul class="accessories" id="hk-accessories"></ul>
-      <button id="hk-unpair" style="margin-top:10px;font-size:11px;padding:3px 8px;" hidden>
-        unpair all
-      </button>
+      <div class="hint" id="hk-paired-hint" hidden>
+        To remove or re-pair, delete the accessory in the Home app.
+      </div>
     </div>
   </div>
 </div>
@@ -1142,8 +1142,9 @@ const hkToggle = document.getElementById('homekit-toggle');
 const hkState = document.getElementById('hk-state');
 const hkQR = document.getElementById('hk-qr');
 const hkCode = document.getElementById('hk-code');
+const hkQRWrap = document.getElementById('hk-qr-wrap');
 const hkAccessories = document.getElementById('hk-accessories');
-const hkUnpair = document.getElementById('hk-unpair');
+const hkPairedHint = document.getElementById('hk-paired-hint');
 
 async function refreshHomeKit() {
   let st;
@@ -1161,8 +1162,12 @@ async function refreshHomeKit() {
   hkState.innerHTML = st.paired
     ? '<span class="pill paired">paired</span>'
     : '<span class="pill unpaired">not paired</span>';
-  hkCode.textContent = st.pin;
-  hkUnpair.hidden = !st.paired;
+
+  // The server withholds the setup code once paired — it's a permanent
+  // credential for the door locks — so the QR section goes away with it.
+  hkQRWrap.hidden = st.paired;
+  hkPairedHint.hidden = !st.paired;
+  hkCode.textContent = st.pin || '';
 
   hkAccessories.replaceChildren();
   for (const a of st.accessories || []) {
@@ -1177,9 +1182,8 @@ async function refreshHomeKit() {
   }
 }
 
-// The QR is static for a given pin, but the server bounces its accessory
-// after an unpair — reloading with a cache-buster keeps a stale image from
-// hiding that the accessory is pairable again.
+// Cache-busted so the browser doesn't keep showing a QR the server has
+// since stopped serving.
 function reloadHomeKitQR() {
   hkQR.src = '/homekit/qr.png?t=' + Date.now();
 }
@@ -1196,19 +1200,6 @@ function closeHomeKit() {
 }
 document.getElementById('hk-close').addEventListener('click', closeHomeKit);
 hkEl.addEventListener('click', (e) => { if (e.target === hkEl) closeHomeKit(); });
-
-hkUnpair.addEventListener('click', async () => {
-  if (!confirm('Remove every HomeKit pairing? You will have to add the accessories again in the Home app.')) return;
-  try {
-    const res = await fetch('/homekit/unpair', { method: 'POST' });
-    if (!res.ok) throw new Error('http ' + res.status);
-  } catch (err) {
-    alert('Unpair failed: ' + err.message);
-    return;
-  }
-  // The accessory restarts to re-advertise itself; give it a beat.
-  setTimeout(() => { reloadHomeKitQR(); refreshHomeKit(); }, 1000);
-});
 
 refreshHomeKit();
 

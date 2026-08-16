@@ -15,6 +15,10 @@ const (
 	bridgeName         = "camonitor"
 	bridgeManufacturer = "camonitor"
 
+	// HAP wants a major.minor.patch firmware revision. hap's placeholder
+	// is "-", which the Home app renders as an empty Version field.
+	accessoryFirmware = "1.0.0"
+
 	// Accessory instance IDs. HomeKit identifies an accessory by this
 	// number, so they are assigned explicitly rather than left to
 	// insertion order: reordering `streams` in config would otherwise
@@ -40,6 +44,7 @@ func buildBridgeAccessories(
 		Manufacturer: bridgeManufacturer,
 		Model:        "camonitor",
 		SerialNumber: bridgeName,
+		Firmware:     accessoryFirmware,
 	})
 	bridge.A.Id = bridgeAID
 
@@ -73,6 +78,7 @@ func newLockAccessory(s StreamConfig, doors doorOpener, relock time.Duration, ai
 		Manufacturer: bridgeManufacturer,
 		Model:        "Dahua VTO",
 		SerialNumber: s.ID,
+		Firmware:     accessoryFirmware,
 	}, accessory.TypeDoorLock)
 	a.Id = aid
 
@@ -92,6 +98,7 @@ func newClimateAccessory(name string, climate *hkClimate) *accessory.A {
 		Manufacturer: bridgeManufacturer,
 		Model:        "Gree",
 		SerialNumber: "gree",
+		Firmware:     accessoryFirmware,
 	}, accessory.TypeAirConditioner)
 	a.Id = climateAID
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,7 +100,10 @@ func TestUnlockPulsesRelayAndRelocks(t *testing.T) {
 	}
 }
 
-func TestFailedUnlockReportsJam(t *testing.T) {
+// A failed open must surface as a failed write and must NOT move the tile
+// off Secured. HomeKit renders a handler error as "No Response" and
+// reverts the toggle, which is the truth: the door did not open.
+func TestFailedUnlockLeavesTheLockSecured(t *testing.T) {
 	wantErr := errors.New("camera did not respond")
 	doors := &fakeDoors{err: wantErr}
 	timer := &fakeTimer{}
@@ -109,17 +113,11 @@ func TestFailedUnlockReportsJam(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
-	if current, _ := lockStates(l); current != characteristic.LockCurrentStateJammed {
-		t.Errorf("current = %d, want Jammed", current)
-	}
-	if len(timer.durations) != 1 || timer.durations[0] != jamDisplayTime {
-		t.Fatalf("scheduled %v, want one %v jam display", timer.durations, jamDisplayTime)
-	}
-
-	timer.fireLast(t)
-
 	if current, _ := lockStates(l); current != characteristic.LockCurrentStateSecured {
-		t.Errorf("after jam display current = %d, want Secured", current)
+		t.Errorf("current = %d, want Secured", current)
+	}
+	if len(timer.durations) != 0 {
+		t.Errorf("scheduled %v, want no relock after a failed open", timer.durations)
 	}
 }
 
@@ -168,6 +166,72 @@ func TestRepeatedUnlockRestartsTimerRatherThanStacking(t *testing.T) {
 	if current, _ := lockStates(l); current != characteristic.LockCurrentStateUnsecured {
 		t.Errorf("current = %d, want Unsecured", current)
 	}
+}
+
+// hap dispatches writes on each connection's own goroutine, and a
+// household usually has several paired controllers, so concurrent unlocks
+// of the same door are ordinary rather than exotic. Run under -race.
+func TestConcurrentUnlocksLeaveExactlyOneLiveTimer(t *testing.T) {
+	timer := &lockingTimer{}
+	l := newHKLock("vto1", "FrontDoor", &lockingDoors{}, 5*time.Second, timer.schedule)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if err := l.setTarget(characteristic.LockTargetStateUnsecured); err != nil {
+				t.Errorf("unlock: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+
+	if live := timer.liveCount(); live != 1 {
+		t.Errorf("%d live timers after 8 concurrent unlocks, want 1", live)
+	}
+	if current, _ := lockStates(l); current != characteristic.LockCurrentStateUnsecured {
+		t.Errorf("current = %d, want Unsecured", current)
+	}
+}
+
+// lockingTimer is fakeTimer's concurrency-safe sibling.
+type lockingTimer struct {
+	mu    sync.Mutex
+	live  int
+	total int
+}
+
+func (f *lockingTimer) schedule(_ time.Duration, _ func()) func() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.live++
+	f.total++
+	cancelled := false
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !cancelled {
+			cancelled = true
+			f.live--
+		}
+	}
+}
+
+func (f *lockingTimer) liveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.live
+}
+
+type lockingDoors struct {
+	mu     sync.Mutex
+	opened int
+}
+
+func (d *lockingDoors) Open(context.Context, string) error {
+	d.mu.Lock()
+	d.opened++
+	d.mu.Unlock()
+	return nil
 }
 
 func TestSecureWithNoPendingTimerIsHarmless(t *testing.T) {

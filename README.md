@@ -298,7 +298,8 @@ What you get:
 - **One lock per door station** (every stream with `"door": true`). The
   Dahua relay is a momentary pulse and reports no state, so the lock shows
   Unsecured for `relock_after` and then returns to Secured. A failed open
-  shows as Jammed rather than silently succeeding.
+  fails the command — the Home app reverts the toggle and shows the
+  accessory as not responding — rather than silently claiming success.
 - **The air conditioner** as a thermostat tile: power, room temperature,
   set point, heat/cool/auto, fan speed and swing. Gree's dry and fan-only
   modes have no HomeKit equivalent, so they get their own **AC Dry** and
@@ -308,6 +309,16 @@ What you get:
 
 Notes:
 
+- **To remove or re-pair, delete the accessory in the Home app.** That is
+  HomeKit's supported path and camonitor picks it up automatically. There
+  is deliberately no unpair button: this HTTP surface has no
+  authentication, and an endpoint that clears pairings would let anyone on
+  the LAN force the bridge back into a pairable state. For the same reason
+  the setup code and its QR stop being served once pairing completes. If
+  the pairing store is ever wedged, delete `store` and restart.
+- In **Auto** mode the Home app draws a temperature *range*, but the Gree
+  has a single set point, so both ends track it and the band collapses to
+  a point. Heat and Cool show one target and behave normally.
 - Pairing is LAN-only; Bonjour does not cross the tailnet. Away-from-home
   control needs an Apple Home hub (Apple TV or HomePod) on the same
   network. The tailnet web UI remains the fallback.

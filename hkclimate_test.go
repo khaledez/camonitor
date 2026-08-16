@@ -140,18 +140,22 @@ func TestClimateViewOf(t *testing.T) {
 			},
 		},
 		{
-			name: "fahrenheit display unit passes through",
+			// HAP carries every temperature in Celsius; the display-units
+			// characteristic is only a rendering hint. A unit set to °F
+			// reports Fahrenheit numbers that must be converted, not
+			// relabelled — 72 °F published as "72" would be read as 72 °C.
+			name: "fahrenheit unit is converted to celsius",
 			status: GreeStatus{
 				Online: true, Power: 1, Mode: greeModeCool,
-				SetTemp: 22, FanSpeed: 3, RoomTemp: 26, TempUnit: 1,
+				SetTemp: 72, FanSpeed: 3, RoomTemp: 78, TempUnit: 1,
 			},
 			lastTarget: characteristic.TargetHeaterCoolerStateCool,
 			want: climateView{
 				Active:             characteristic.ActiveActive,
 				CurrentState:       characteristic.CurrentHeaterCoolerStateCooling,
 				TargetState:        characteristic.TargetHeaterCoolerStateCool,
-				CurrentTemperature: 26,
-				TargetTemperature:  22,
+				CurrentTemperature: (78 - 32) * 5.0 / 9,
+				TargetTemperature:  (72 - 32) * 5.0 / 9,
 				RotationSpeed:      60,
 				DisplayUnits:       characteristic.TemperatureDisplayUnitsFahrenheit,
 			},
@@ -165,6 +169,42 @@ func TestClimateViewOf(t *testing.T) {
 				t.Errorf("climateViewOf()\n got %+v\nwant %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTemperatureRoundTripsThroughBothUnits(t *testing.T) {
+	for _, unit := range []int{0, 1} {
+		for raw := 16; raw <= 86; raw++ {
+			if unit == 0 && raw > 30 {
+				continue // Celsius units only span 16-30
+			}
+			c := celsius(raw, unit)
+			if got := greeTemp(c, unit); got != raw {
+				t.Errorf("unit=%d: %d -> %.2f°C -> %d, want %d", unit, raw, c, got, raw)
+			}
+		}
+	}
+}
+
+// An unreachable unit must not publish anything: greeClient.Status returns
+// a zero struct on failure, and pushing that would tell every controller
+// the AC just switched off at 0 °C on every dropped UDP packet.
+func TestOfflineStatusIsNotPublished(t *testing.T) {
+	live := GreeStatus{Online: true, Power: 1, Mode: greeModeCool, SetTemp: 22, FanSpeed: 3, RoomTemp: 26}
+	gree := &fakeGree{name: "AC", status: live}
+	c := newHKClimate(gree)
+
+	if got := c.heaterCooler.Active.Value(); got != characteristic.ActiveActive {
+		t.Fatalf("Active = %d before the drop, want Active", got)
+	}
+
+	c.Update(GreeStatus{}) // what a timed-out poll hands us
+
+	if got := c.heaterCooler.Active.Value(); got != characteristic.ActiveActive {
+		t.Errorf("Active = %d after an offline poll, want the last known Active", got)
+	}
+	if got := c.heaterCooler.CurrentTemperature.Value(); got != 26 {
+		t.Errorf("CurrentTemperature = %v after an offline poll, want the last known 26", got)
 	}
 }
 

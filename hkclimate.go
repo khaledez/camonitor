@@ -12,6 +12,7 @@ import (
 	"context"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/brutella/hap/characteristic"
 	"github.com/brutella/hap/service"
@@ -21,6 +22,12 @@ import (
 // Values 2..6 park the louvre at a fixed angle, which HomeKit's binary
 // SwingMode has no way to express, so only 1 counts as "swinging".
 const greeSwingFull = 1
+
+// climateWriteTimeout caps one HomeKit-initiated write to the AC. iOS
+// abandons a characteristic write at around 10s, and the whole bridge
+// shares one connection per controller, so a slower cap would strand the
+// door locks behind a flaky air conditioner.
+const climateWriteTimeout = 9 * time.Second
 
 // climateView is the HomeKit-facing projection of a Gree unit's state.
 // Keeping it a plain comparable struct is what makes the mapping — the
@@ -38,6 +45,26 @@ type climateView struct {
 	FanOnlyOn          bool
 }
 
+// celsius converts a Gree temperature to the Celsius HAP always carries.
+// TemperatureDisplayUnits is a display preference only — every value on
+// the wire is Celsius — so a unit configured in Fahrenheit reports
+// Fahrenheit numbers that have to be converted, not just labelled.
+func celsius(t, tempUnit int) float64 {
+	if tempUnit != 1 {
+		return float64(t)
+	}
+	return (float64(t) - 32) * 5 / 9
+}
+
+// greeTemp is the inverse of celsius: what to send the unit for a set
+// point HomeKit expressed in Celsius.
+func greeTemp(c float64, tempUnit int) int {
+	if tempUnit != 1 {
+		return int(math.Round(c))
+	}
+	return int(math.Round(c*9/5 + 32))
+}
+
 // climateViewOf projects a Gree status onto HomeKit characteristics.
 // lastTarget carries the heat/cool/auto choice forward while the unit sits
 // in dry or fan-only mode.
@@ -46,8 +73,8 @@ func climateViewOf(st GreeStatus, lastTarget int) climateView {
 		Active:             characteristic.ActiveInactive,
 		CurrentState:       characteristic.CurrentHeaterCoolerStateInactive,
 		TargetState:        homekitTargetState(st.Mode, lastTarget),
-		CurrentTemperature: float64(st.RoomTemp),
-		TargetTemperature:  float64(st.SetTemp),
+		CurrentTemperature: celsius(st.RoomTemp, st.TempUnit),
+		TargetTemperature:  celsius(st.SetTemp, st.TempUnit),
 		RotationSpeed:      rotationSpeedForFan(st.FanSpeed),
 		SwingMode:          characteristic.SwingModeSwingDisabled,
 		DisplayUnits:       characteristic.TemperatureDisplayUnitsCelsius,
@@ -57,7 +84,7 @@ func climateViewOf(st GreeStatus, lastTarget int) climateView {
 	// renders that as a literal 0 °C rather than "unknown", so the set
 	// point is the more plausible stand-in.
 	if st.RoomTemp == 0 {
-		view.CurrentTemperature = float64(st.SetTemp)
+		view.CurrentTemperature = celsius(st.SetTemp, st.TempUnit)
 	}
 	if st.SwingV == greeSwingFull {
 		view.SwingMode = characteristic.SwingModeSwingEnabled
@@ -187,6 +214,12 @@ func newHKClimate(gree greeDevice) *hkClimate {
 	}
 	c.speed.SetStepValue(20)
 
+	// Read-only: the unit's °C/°F setting is its own, and hap advertises
+	// this characteristic as writable by default. Leaving it writable but
+	// unbound would let a controller "change" it and have the next poll
+	// silently revert.
+	c.units.Permissions = []string{characteristic.PermissionRead, characteristic.PermissionEvents}
+
 	hc := c.heaterCooler
 	hc.AddC(c.cooling.C)
 	hc.AddC(c.heating.C)
@@ -231,8 +264,9 @@ func (c *hkClimate) bindWrites() {
 	})
 
 	// Gree has a single set point, so both HomeKit thresholds drive it.
+	// HomeKit always speaks Celsius; the unit may not.
 	setTemp := func(v float64) error {
-		return c.apply(map[string]int{"temp": int(math.Round(v))})
+		return c.apply(map[string]int{"temp": greeTemp(v, c.gree.Status().TempUnit)})
 	}
 	c.cooling.OnSetRemoteValue(setTemp)
 	c.heating.OnSetRemoteValue(setTemp)
@@ -267,11 +301,21 @@ func (c *hkClimate) applyModeSwitch(on bool, mode int) error {
 	return c.apply(map[string]int{"power": 1, "mode": mode})
 }
 
-// apply sends params to the unit and immediately republishes the state it
-// reports back, so the Home app settles on the truth rather than on what
-// it optimistically assumed.
+// apply sends params to the unit and republishes what it reports back, so
+// the other characteristics settle on the truth. The one being written is
+// not corrected here — hap assigns the controller's optimistic value after
+// this handler returns — so a value the unit refuses stays wrong on the
+// tile until the next poll.
+//
+// The deadline matters more than it looks: a Gree that has lost its
+// session key re-runs scan + bind before the command, and iOS holds a
+// single HAP connection per controller for the whole bridge, so an
+// unbounded AC write would stall reads and writes for the door locks too.
 func (c *hkClimate) apply(params map[string]int) error {
-	if err := c.gree.Set(context.Background(), params); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), climateWriteTimeout)
+	defer cancel()
+
+	if err := c.gree.Set(ctx, params); err != nil {
 		return err
 	}
 	c.Update(c.gree.Status())
@@ -281,7 +325,17 @@ func (c *hkClimate) apply(params map[string]int) error {
 // Update republishes every characteristic from a fresh status. Wired to
 // GreeController's poll so changes made from the physical remote or the
 // web UI reach HomeKit as events.
+//
+// An unreachable unit is skipped rather than published. greeClient.Status
+// returns a zero-valued struct on any failure, and publishing that would
+// tell every controller the AC just switched off at 0 °C — flapping the
+// tile and firing any automation keyed on it — every time a single UDP
+// exchange times out.
 func (c *hkClimate) Update(st GreeStatus) {
+	if !st.Online {
+		return
+	}
+
 	view := climateViewOf(st, c.getLastTarget())
 	c.setLastTarget(view.TargetState)
 
