@@ -227,13 +227,18 @@ type HomeKitManager struct {
 	servers []*hkServer
 	qrPNG   []byte
 	climate *hkClimate
+	cameras []*hkCamera
+	bell    *BellBus
 }
 
-// NewHomeKitManager builds the phase-1 bridge: one lock per door station
-// and, when configured, the air conditioner. Returns an error for any
-// misconfiguration that would otherwise surface as a mystifying pairing
-// failure later.
-func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpener, gree greeDevice) (*HomeKitManager, error) {
+// NewHomeKitManager builds the bridge — one lock per door station plus the
+// air conditioner — and one standalone video-doorbell accessory per door
+// station. Returns an error for any misconfiguration that would otherwise
+// surface as a mystifying pairing failure later.
+//
+// bell and snapshot may be nil, in which case the camera accessories are
+// skipped and only the bridge is published.
+func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpener, gree greeDevice, bell *BellBus, snapshot snapshotFetcher) (*HomeKitManager, error) {
 	pin, err := normalizePin(cfg.Pin)
 	if err != nil {
 		return nil, err
@@ -244,43 +249,78 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 	}
 
 	bridge, children, climate := buildBridgeAccessories(streams, doors, gree, relock)
-
-	storeDir := filepath.Join(cfg.store(), "bridge")
-	store, err := openPairingStore(storeDir)
+	bridgeSrv, err := newHKServer(cfg, pin, bridgeName, "bridge", cfg.port(),
+		accessory.TypeBridge, bridge, children...)
 	if err != nil {
 		return nil, err
 	}
 
-	addr := fmt.Sprintf(":%d", cfg.port())
-	setupID := setupIDFor(pin, bridgeName)
+	m := &HomeKitManager{
+		pin:     pin,
+		servers: []*hkServer{bridgeSrv},
+		qrPNG:   renderQRPNG(bridgeSrv.uri),
+		climate: climate,
+		bell:    bell,
+	}
+
+	if bell == nil || snapshot == nil {
+		return m, nil
+	}
+
+	// Cameras cannot ride the bridge, so each gets its own server on the
+	// port above it, sharing the one setup code. The Home app surfaces
+	// them as nearby accessories once the bridge is paired.
+	port := cfg.port()
+	for _, s := range doorStreams(streams) {
+		port++
+		cam := newHKCamera(s, bell, snapshot)
+		srv, err := newHKServer(cfg, pin, cam.a.Name(), "camera-"+s.ID, port,
+			accessory.TypeVideoDoorbell, cam.a)
+		if err != nil {
+			return nil, err
+		}
+		// HAP has no snapshot characteristic; the Home app fetches stills
+		// over the encrypted session at this path.
+		srv.srv.ServeMux().HandleFunc("/resource", cam.handleSnapshot(srv.srv))
+
+		m.cameras = append(m.cameras, cam)
+		m.servers = append(m.servers, srv)
+	}
+	return m, nil
+}
+
+// newHKServer wires one pairable accessory tree onto its own port and
+// pairing store.
+func newHKServer(cfg HomeKitConfig, pin, name, storeName string, port int, category byte, a *accessory.A, children ...*accessory.A) (*hkServer, error) {
+	store, err := openPairingStore(filepath.Join(cfg.store(), storeName))
+	if err != nil {
+		return nil, err
+	}
 
 	// Exactly one NewServer per accessory tree, ever: it appends a
 	// notification callback to every characteristic, so a second call over
 	// the same accessories makes hap emit each event twice.
-	srv, err := hap.NewServer(store, bridge, children...)
+	srv, err := hap.NewServer(store, a, children...)
 	if err != nil {
-		return nil, fmt.Errorf("build accessories: %w", err)
+		return nil, fmt.Errorf("build accessories for %s: %w", name, err)
 	}
+
+	setupID := setupIDFor(pin, name)
 	srv.Pin = pin
-	srv.Addr = addr
+	srv.Addr = fmt.Sprintf(":%d", port)
 	srv.SetupId = setupID
 
-	uri, err := setupPayloadURI(pin, accessory.TypeBridge, setupID)
+	uri, err := setupPayloadURI(pin, category, setupID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &HomeKitManager{
-		pin: pin,
-		servers: []*hkServer{{
-			name:  bridgeName,
-			addr:  addr,
-			uri:   uri,
-			srv:   srv,
-			store: store,
-		}},
-		qrPNG:   renderQRPNG(uri),
-		climate: climate,
+	return &hkServer{
+		name:  name,
+		addr:  srv.Addr,
+		uri:   uri,
+		srv:   srv,
+		store: store,
 	}, nil
 }
 
@@ -302,11 +342,18 @@ func openPairingStore(dir string) (hap.Store, error) {
 	return store, nil
 }
 
-// startHomeKit builds and starts the bridge when configured, returning nil
-// when HomeKit is off or its pairing store is unusable. Misconfiguration —
-// a bad pin, a taken port — is fatal instead, because those would
-// otherwise surface as an accessory that silently never appears.
-func startHomeKit(ctx context.Context, cfg *Config, doors doorOpener, gree *GreeController) *HomeKitManager {
+// newHomeKit builds the bridge when configured, returning nil when
+// HomeKit is off or its pairing store is unusable. Misconfiguration — a
+// bad pin — is fatal instead, because it would otherwise surface as an
+// accessory that silently never appears.
+//
+// The caller starts Run and is expected to join it on shutdown: hap's
+// dnssd responder sends goodbye records when its context is cancelled,
+// and exiting before it does leaves a ghost accessory advertised on the
+// network until the record ages out. That is not hypothetical here — the
+// deployment uses the Recreate strategy, so every redeploy would leave
+// one behind.
+func newHomeKit(cfg *Config, doors doorOpener, gree *GreeController, bell *BellBus, snapshot snapshotFetcher) *HomeKitManager {
 	if cfg.HomeKit == nil {
 		log.Printf("homekit: not configured (skipping)")
 		return nil
@@ -319,7 +366,7 @@ func startHomeKit(ctx context.Context, cfg *Config, doors doorOpener, gree *Gree
 		greeDev = gree
 	}
 
-	m, err := NewHomeKitManager(*cfg.HomeKit, cfg.Streams, doors, greeDev)
+	m, err := NewHomeKitManager(*cfg.HomeKit, cfg.Streams, doors, greeDev, bell, snapshot)
 	if err != nil {
 		if errors.Is(err, errHomeKitStore) {
 			log.Printf("homekit: %v — disabled; doors and web UI unaffected", err)
@@ -331,7 +378,6 @@ func startHomeKit(ctx context.Context, cfg *Config, doors doorOpener, gree *Gree
 	if climate := m.Climate(); climate != nil {
 		gree.OnUpdate(climate.Update)
 	}
-	go m.Run(ctx)
 	return m
 }
 
@@ -344,22 +390,64 @@ func (m *HomeKitManager) Run(ctx context.Context) {
 	m.printPairingCode()
 
 	var wg sync.WaitGroup
+
+	// One subscription feeds every camera. BellBus fans out to each
+	// subscriber, and a per-camera subscription would just mean more
+	// channels carrying the same events.
+	if len(m.cameras) > 0 {
+		events, unsubscribe := m.bell.Subscribe()
+		wg.Go(func() {
+			defer unsubscribe()
+			m.dispatchBell(ctx, events)
+		})
+	}
+
 	for _, s := range m.servers {
 		wg.Go(func() { s.run(ctx) })
 	}
+
 	wg.Wait()
+
+	for _, cam := range m.cameras {
+		cam.stop()
+	}
+}
+
+// dispatchBell hands each ring to the camera it belongs to.
+func (m *HomeKitManager) dispatchBell(ctx context.Context, events <-chan BellEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			for _, cam := range m.cameras {
+				cam.ring(ev)
+			}
+		}
+	}
 }
 
 // printPairingCode writes the setup code to stdout when nothing is paired
 // yet, so a headless setup can pair from `docker logs` alone.
 func (m *HomeKitManager) printPairingCode() {
+	var unpaired []string
 	for _, s := range m.servers {
-		if s.pairedControllers() > 0 {
-			continue
+		if s.pairedControllers() == 0 {
+			unpaired = append(unpaired, s.name)
 		}
-		log.Printf("homekit [%s]: not paired — setup code %s", s.name, formatPin(m.pin))
-		qrterminal.GenerateHalfBlock(s.uri, qrterminal.L, os.Stdout)
 	}
+	if len(unpaired) == 0 {
+		return
+	}
+
+	log.Printf("homekit: setup code %s — not yet paired: %s",
+		formatPin(m.pin), strings.Join(unpaired, ", "))
+	// One QR only. Every accessory shares the code, and the Home app finds
+	// the cameras as nearby accessories once the bridge is in.
+	qrterminal.GenerateHalfBlock(m.servers[0].uri, qrterminal.L, os.Stdout)
 }
 
 // HomeKitStatus is the JSON shape served to the web UI. Pin is populated
@@ -376,14 +464,19 @@ type HomeKitAccessoryDTO struct {
 	Controllers int    `json:"controllers"`
 }
 
-// paired reports whether any accessory has at least one controller.
-func (m *HomeKitManager) paired() bool {
+// fullyPaired reports whether every accessory has a controller — i.e.
+// setup is finished and the code is no longer needed.
+//
+// Deliberately "every", not "any": the cameras are separate accessories
+// that each need the code at Add Accessory time, so withholding it the
+// moment the bridge pairs would strand the user halfway through setup.
+func (m *HomeKitManager) fullyPaired() bool {
 	for _, s := range m.servers {
-		if s.pairedControllers() > 0 {
-			return true
+		if s.pairedControllers() == 0 {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // HandleStatus serves GET /homekit/status.
@@ -394,7 +487,7 @@ func (m *HomeKitManager) paired() bool {
 // pairing, except that here the code never rotates, so withholding it
 // matters more.
 func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	st := HomeKitStatus{Configured: true, Paired: m.paired()}
+	st := HomeKitStatus{Configured: true, Paired: m.fullyPaired()}
 	if !st.Paired {
 		st.Pin = formatPin(m.pin)
 	}
@@ -414,7 +507,7 @@ func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
 // only while unpaired. The QR encodes the setup code, so serving it after
 // pairing would hand out the same credential HandleStatus withholds.
 func (m *HomeKitManager) HandleQR(w http.ResponseWriter, r *http.Request) {
-	if len(m.qrPNG) == 0 || m.paired() {
+	if len(m.qrPNG) == 0 || m.fullyPaired() {
 		http.NotFound(w, r)
 		return
 	}
