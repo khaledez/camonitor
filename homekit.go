@@ -185,7 +185,8 @@ func setupIDFor(pin, name string) string {
 type hkServer struct {
 	name  string
 	addr  string
-	uri   string // X-HM:// setup payload, pre-rendered for the QR
+	uri   string // X-HM:// setup payload
+	qrPNG []byte // pre-rendered QR of uri
 	srv   *hap.Server
 	store hap.Store
 }
@@ -225,7 +226,6 @@ func (s *hkServer) run(ctx context.Context) {
 type HomeKitManager struct {
 	pin     string // eight digits, no dashes
 	servers []*hkServer
-	qrPNG   []byte
 	climate *hkClimate
 	cameras []*hkCamera
 	bell    *BellBus
@@ -258,7 +258,6 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 	m := &HomeKitManager{
 		pin:     pin,
 		servers: []*hkServer{bridgeSrv},
-		qrPNG:   renderQRPNG(bridgeSrv.uri),
 		climate: climate,
 		bell:    bell,
 	}
@@ -319,6 +318,7 @@ func newHKServer(cfg HomeKitConfig, pin, name, storeName string, port int, categ
 		name:  name,
 		addr:  srv.Addr,
 		uri:   uri,
+		qrPNG: renderQRPNG(uri),
 		srv:   srv,
 		store: store,
 	}, nil
@@ -432,22 +432,18 @@ func (m *HomeKitManager) dispatchBell(ctx context.Context, events <-chan BellEve
 
 // printPairingCode writes the setup code to stdout when nothing is paired
 // yet, so a headless setup can pair from `docker logs` alone.
+// One QR per unpaired accessory, not one for the lot. They share a setup
+// code but not a setup id, and HomeKit matches a scanned payload by the
+// latter — so the bridge's QR can only ever add the bridge.
 func (m *HomeKitManager) printPairingCode() {
-	var unpaired []string
 	for _, s := range m.servers {
-		if s.pairedControllers() == 0 {
-			unpaired = append(unpaired, s.name)
+		if s.pairedControllers() > 0 {
+			continue
 		}
+		log.Printf("homekit [%s]: not paired — scan below, or add it by name with code %s",
+			s.name, formatPin(m.pin))
+		qrterminal.GenerateHalfBlock(s.uri, qrterminal.L, os.Stdout)
 	}
-	if len(unpaired) == 0 {
-		return
-	}
-
-	log.Printf("homekit: setup code %s — not yet paired: %s",
-		formatPin(m.pin), strings.Join(unpaired, ", "))
-	// One QR only. Every accessory shares the code, and the Home app finds
-	// the cameras as nearby accessories once the bridge is in.
-	qrterminal.GenerateHalfBlock(m.servers[0].uri, qrterminal.L, os.Stdout)
 }
 
 // HomeKitStatus is the JSON shape served to the web UI. Pin is populated
@@ -462,6 +458,7 @@ type HomeKitStatus struct {
 type HomeKitAccessoryDTO struct {
 	Name        string `json:"name"`
 	Controllers int    `json:"controllers"`
+	Paired      bool   `json:"paired"`
 }
 
 // fullyPaired reports whether every accessory has a controller — i.e.
@@ -492,9 +489,11 @@ func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		st.Pin = formatPin(m.pin)
 	}
 	for _, s := range m.servers {
+		n := s.pairedControllers()
 		st.Accessories = append(st.Accessories, HomeKitAccessoryDTO{
 			Name:        s.name,
-			Controllers: s.pairedControllers(),
+			Controllers: n,
+			Paired:      n > 0,
 		})
 	}
 
@@ -503,18 +502,41 @@ func (m *HomeKitManager) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
-// HandleQR serves GET /homekit/qr.png — the bridge's setup payload, and
-// only while unpaired. The QR encodes the setup code, so serving it after
-// pairing would hand out the same credential HandleStatus withholds.
+// HandleQR serves GET /homekit/qr.png?accessory=<name>, defaulting to the
+// bridge.
+//
+// Every accessory needs its own QR. HomeKit matches a scanned payload to
+// an accessory by setup id, and each has a different one — scanning the
+// bridge's code while trying to add a camera just finds the bridge again,
+// which is exactly the dead end a single shared QR led to.
+//
+// A QR is withheld once its accessory is paired: it encodes the setup
+// code, which is a permanent credential for the door locks on an
+// unauthenticated mux.
 func (m *HomeKitManager) HandleQR(w http.ResponseWriter, r *http.Request) {
-	if len(m.qrPNG) == 0 || m.fullyPaired() {
+	s := m.serverNamed(r.URL.Query().Get("accessory"))
+	if s == nil || len(s.qrPNG) == 0 || s.pairedControllers() > 0 {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Length", strconv.Itoa(len(m.qrPNG)))
-	_, _ = w.Write(m.qrPNG)
+	w.Header().Set("Content-Length", strconv.Itoa(len(s.qrPNG)))
+	_, _ = w.Write(s.qrPNG)
+}
+
+// serverNamed resolves an accessory name, falling back to the bridge when
+// the name is empty so the endpoint keeps working without a parameter.
+func (m *HomeKitManager) serverNamed(name string) *hkServer {
+	if name == "" {
+		return m.servers[0]
+	}
+	for _, s := range m.servers {
+		if s.name == name {
+			return s
+		}
+	}
+	return nil
 }
 
 // handleHomeKitDisabled answers the status endpoint when HomeKit is off,

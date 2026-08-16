@@ -29,6 +29,7 @@ import (
 // runRTSPReader in place of a WebRTC track.
 type srtpForwarder struct {
 	conn        *net.UDPConn
+	target      *net.UDPAddr
 	streamID    string
 	ssrc        uint32
 	payloadType uint8
@@ -41,22 +42,22 @@ type srtpForwarder struct {
 	warnedMTU bool
 }
 
-// newSRTPForwarder dials the controller and prepares the encryption
-// context. key and salt come from the controller's SetupEndpoints request.
-func newSRTPForwarder(streamID string, target *net.UDPAddr, key, salt []byte, ssrc uint32, payloadType uint8, mtu int) (*srtpForwarder, error) {
-	conn, err := net.DialUDP("udp", nil, target)
-	if err != nil {
-		return nil, fmt.Errorf("dial controller %s: %w", target, err)
-	}
-
+// newSRTPForwarder prepares the encryption context around an already-bound
+// socket. key and salt come from the controller's SetupEndpoints request.
+//
+// The socket is bound during SetupEndpoints rather than here, because its
+// port is part of the answer the controller is given — it addresses its
+// RTCP to it. Binding at stream-start would mean advertising a port we had
+// not chosen yet.
+func newSRTPForwarder(streamID string, conn *net.UDPConn, target *net.UDPAddr, key, salt []byte, ssrc uint32, payloadType uint8, mtu int) (*srtpForwarder, error) {
 	ctx, err := srtp.CreateContext(key, salt, srtp.ProtectionProfileAes128CmHmacSha1_80)
 	if err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("srtp context: %w", err)
 	}
 
 	return &srtpForwarder{
 		conn:        conn,
+		target:      target,
 		streamID:    streamID,
 		ssrc:        ssrc,
 		payloadType: payloadType,
@@ -107,7 +108,7 @@ func (f *srtpForwarder) WriteRTP(p *rtp.Packet) error {
 	if err != nil {
 		return fmt.Errorf("encrypt rtp: %w", err)
 	}
-	if _, err := f.conn.Write(encrypted); err != nil {
+	if _, err := f.conn.WriteToUDP(encrypted, f.target); err != nil {
 		return fmt.Errorf("send to controller: %w", err)
 	}
 	return nil

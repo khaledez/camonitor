@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/brutella/hap/characteristic"
 	"github.com/brutella/hap/rtp"
 	"github.com/brutella/hap/service"
+	"github.com/brutella/hap/tlv8"
 )
 
 func testBellBus(t *testing.T) (*BellBus, snapshotFetcher) {
@@ -168,7 +173,7 @@ func TestSetupCodeSurvivesUntilEveryAccessoryIsPaired(t *testing.T) {
 	if st.Pin != "" {
 		t.Errorf("setup code %q still served after setup completed", st.Pin)
 	}
-	if code := recordQR(t, m).Code; code != 404 {
+	if code := recordQR(t, m, "").Code; code != 404 {
 		t.Errorf("qr.png = %d after setup completed, want 404", code)
 	}
 }
@@ -181,4 +186,191 @@ func streamConfigFor(width, height uint16) (cfg rtp.StreamConfiguration) {
 	cfg.Video.RTP.PayloadType = 99
 	cfg.Video.RTP.MTU = 1378
 	return cfg
+}
+
+// Each accessory needs its own QR: they share a setup code but not a setup
+// id, and HomeKit matches a scanned payload by the latter. Serving one
+// shared QR is what left the doorbells unpairable — scanning it just found
+// the bridge again.
+func TestEachAccessoryServesItsOwnQR(t *testing.T) {
+	bell, fetch := testBellBus(t)
+	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
+
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	if err != nil {
+		t.Fatalf("NewHomeKitManager: %v", err)
+	}
+
+	seen := map[string]string{}
+	for _, s := range m.servers {
+		rec := recordQR(t, m, s.name)
+		if rec.Code != 200 {
+			t.Fatalf("qr for %q = %d, want 200", s.name, rec.Code)
+		}
+		body := rec.Body.String()
+		if other, dup := seen[body]; dup {
+			t.Errorf("%q and %q serve an identical QR; one of them cannot be added", s.name, other)
+		}
+		seen[body] = s.name
+	}
+
+	if got := recordQR(t, m, "NoSuchAccessory").Code; got != 404 {
+		t.Errorf("qr for an unknown accessory = %d, want 404", got)
+	}
+}
+
+// Pairing one accessory must not take the others' codes away — that is the
+// whole point of the per-accessory split.
+func TestPairingOneAccessoryLeavesTheOthersPairable(t *testing.T) {
+	bell, fetch := testBellBus(t)
+	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
+
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	if err != nil {
+		t.Fatalf("NewHomeKitManager: %v", err)
+	}
+
+	bridge := m.servers[0]
+	if err := bridge.store.Set("controller.pairing", []byte("{}")); err != nil {
+		t.Fatalf("seed pairing: %v", err)
+	}
+
+	if got := recordQR(t, m, bridge.name).Code; got != 404 {
+		t.Errorf("qr for the paired bridge = %d, want 404", got)
+	}
+	for _, s := range m.servers[1:] {
+		if got := recordQR(t, m, s.name).Code; got != 200 {
+			t.Errorf("qr for still-unpaired %q = %d, want 200", s.name, got)
+		}
+	}
+
+	var st HomeKitStatus
+	decodeStatus(t, m, &st)
+	if st.Accessories[0].Paired != true {
+		t.Error("bridge not reported as paired")
+	}
+	for _, a := range st.Accessories[1:] {
+		if a.Paired {
+			t.Errorf("%q reported paired when it is not", a.Name)
+		}
+	}
+}
+
+// setupEndpointsRequest builds the TLV iOS writes to begin a stream.
+func setupEndpointsRequest(t *testing.T, controllerPort uint16) string {
+	t.Helper()
+	key, salt := randomSRTPKeySalt()
+	b, err := tlv8.Marshal(rtp.SetupEndpoints{
+		SessionId: []byte("0123456789abcdef"),
+		ControllerAddr: rtp.Addr{
+			IPVersion:    rtp.IPAddrVersionv4,
+			IPAddr:       "127.0.0.1",
+			VideoRtpPort: controllerPort,
+			AudioRtpPort: controllerPort + 1,
+		},
+		Video: rtp.CryptoSuite{Type: rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80, MasterKey: key, MasterSalt: salt},
+		Audio: rtp.CryptoSuite{Type: rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80, MasterKey: key, MasterSalt: salt},
+	})
+	if err != nil {
+		t.Fatalf("marshal SetupEndpoints: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// TestSetupEndpointsAnswersTheController is the regression test for the
+// defect that shipped in v0.9.0: the answer was written into the same
+// characteristic the controller had just written, and hap overwrites it
+// with the request immediately afterwards. iOS was left with no endpoint
+// and abandoned the stream before ever sending a start command — the Home
+// app showed "No Response".
+func TestSetupEndpointsAnswersTheController(t *testing.T) {
+	sess := newHKStreamSession(testStreams[0], "vto1/0")
+
+	if !sess.svc.SetupEndpoints.IsWriteResponse() {
+		t.Fatal("SetupEndpoints is not marked write-response; the controller cannot receive the answer")
+	}
+
+	const controllerPort = 50000
+	request := setupEndpointsRequest(t, controllerPort)
+
+	value, code := sess.svc.SetupEndpoints.C.SetValueRequest(
+		request, httptest.NewRequest(http.MethodPut, "/characteristics", nil))
+	if code != 0 {
+		t.Fatalf("SetupEndpoints write rejected with status %d", code)
+	}
+
+	encoded, ok := value.(string)
+	if !ok || encoded == "" {
+		t.Fatalf("write returned %#v, want a base64 TLV answer", value)
+	}
+	if encoded == request {
+		t.Fatal("write echoed the controller's own request back; that is the v0.9.0 bug")
+	}
+
+	resp := decodeSetupResponse(t, encoded)
+	if resp.Status != rtp.SessionStatusSuccess {
+		t.Errorf("status = %d, want success", resp.Status)
+	}
+
+	// The advertised port must be one we actually bound — the controller
+	// addresses RTCP to it. v0.9.0 echoed the controller's own port.
+	bound := uint16(sess.currentSetup().conn.LocalAddr().(*net.UDPAddr).Port)
+	if resp.AccessoryAddr.VideoRtpPort != bound {
+		t.Errorf("advertised video port %d, but bound %d",
+			resp.AccessoryAddr.VideoRtpPort, bound)
+	}
+	if resp.AccessoryAddr.VideoRtpPort == controllerPort {
+		t.Error("advertised the controller's own port as the accessory's")
+	}
+	if resp.SsrcVideo < 0 {
+		t.Errorf("SsrcVideo = %d, want non-negative", resp.SsrcVideo)
+	}
+
+	// A plain read must return the answer too, not the request hap left in
+	// the stored value.
+	readBack, code := sess.svc.SetupEndpoints.C.ValueRequest(
+		httptest.NewRequest(http.MethodGet, "/characteristics", nil))
+	if code != 0 {
+		t.Fatalf("read rejected with status %d", code)
+	}
+	if readBack != encoded {
+		t.Error("reading SetupEndpoints did not return the answer")
+	}
+}
+
+// Renegotiation is routine on iOS; each attempt must not leak its socket.
+func TestRepeatedSetupClosesThePreviousSocket(t *testing.T) {
+	sess := newHKStreamSession(testStreams[0], "vto1/0")
+	put := httptest.NewRequest(http.MethodPut, "/characteristics", nil)
+
+	if _, code := sess.svc.SetupEndpoints.C.SetValueRequest(setupEndpointsRequest(t, 50000), put); code != 0 {
+		t.Fatalf("first setup rejected: %d", code)
+	}
+	first := sess.currentSetup().conn
+
+	if _, code := sess.svc.SetupEndpoints.C.SetValueRequest(setupEndpointsRequest(t, 50002), put); code != 0 {
+		t.Fatalf("second setup rejected: %d", code)
+	}
+	second := sess.currentSetup().conn
+
+	if first == second {
+		t.Fatal("second setup reused the first socket")
+	}
+	// Writing to a closed socket errors; that is how we know it was closed.
+	if _, err := first.WriteToUDP([]byte("x"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}); err == nil {
+		t.Error("the superseded socket is still open")
+	}
+}
+
+func decodeSetupResponse(t *testing.T, encoded string) rtp.SetupEndpointsResponse {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	var resp rtp.SetupEndpointsResponse
+	if err := tlv8.Unmarshal(b, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp
 }
