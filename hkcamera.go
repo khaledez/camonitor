@@ -321,9 +321,15 @@ func (s *hkStreamSession) onSetupEndpoints(b []byte) ([]byte, error) {
 		videoSSRC: randomUint32() & 0x7FFFFFFF,
 	}
 
-	// Our half of the key exchange. We send no audio, but the response
-	// must still carry a well-formed audio suite.
-	accKey, accSalt := randomSRTPKeySalt()
+	// Echo the controller's crypto suites rather than minting our own.
+	//
+	// The spec is ambiguous about which side's key encrypts the
+	// accessory's outbound video, and the answer is not observable from
+	// here — a wrong guess just means the controller decrypts garbage and
+	// tears the stream down a couple of seconds later, which is what
+	// v0.9.1 did. Echoing makes the question moot: request, response and
+	// the key we encrypt with are all the same, so either reading works.
+	// It is also what the reference implementation (Homebridge) does.
 	resp, err := tlv8.Marshal(rtp.SetupEndpointsResponse{
 		SessionId: req.SessionId,
 		Status:    rtp.SessionStatusSuccess,
@@ -333,16 +339,8 @@ func (s *hkStreamSession) onSetupEndpoints(b []byte) ([]byte, error) {
 			VideoRtpPort: localPort,
 			AudioRtpPort: localPort,
 		},
-		Video: rtp.CryptoSuite{
-			Type:       rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80,
-			MasterKey:  accKey,
-			MasterSalt: accSalt,
-		},
-		Audio: rtp.CryptoSuite{
-			Type:       rtp.CryptoSuite_AES_CM_128_HMAC_SHA1_80,
-			MasterKey:  accKey,
-			MasterSalt: accSalt,
-		},
+		Video:     req.Video,
+		Audio:     req.Audio,
 		SsrcVideo: int32(setup.videoSSRC),
 		SsrcAudio: int32(randomUint32() & 0x7FFFFFFF),
 	})

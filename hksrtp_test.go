@@ -95,6 +95,12 @@ func TestForwarderProducesDecryptableStream(t *testing.T) {
 			t.Errorf("packet %d sequence = %d, want %d (contiguous)", i, got.SequenceNumber, want)
 		}
 	}
+
+	// The count is what tells "the controller rejected our media" apart
+	// from "no media ever reached it" when diagnosing from logs.
+	if got := fwd.sentPackets(); got != len(sent) {
+		t.Errorf("sentPackets = %d, want %d", got, len(sent))
+	}
 }
 
 func TestForwarderWriteAfterCloseIsHarmless(t *testing.T) {

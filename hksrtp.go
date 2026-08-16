@@ -38,6 +38,7 @@ type srtpForwarder struct {
 	mu        sync.Mutex
 	ctx       *srtp.Context
 	seq       uint16
+	sent      int
 	closed    bool
 	warnedMTU bool
 }
@@ -111,6 +112,7 @@ func (f *srtpForwarder) WriteRTP(p *rtp.Packet) error {
 	if _, err := f.conn.WriteToUDP(encrypted, f.target); err != nil {
 		return fmt.Errorf("send to controller: %w", err)
 	}
+	f.sent++
 	return nil
 }
 
@@ -121,7 +123,18 @@ func (f *srtpForwarder) Close() error {
 		return nil
 	}
 	f.closed = true
+	// The packet count separates "the controller rejected our media" from
+	// "no media ever reached it", which are very different problems and
+	// otherwise look identical from the outside.
+	log.Printf("homekit camera [%s]: forwarded %d packets", f.streamID, f.sent)
 	return f.conn.Close()
+}
+
+// sentPackets reports how many packets have been forwarded.
+func (f *srtpForwarder) sentPackets() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sent
 }
 
 func randomUint16() uint16 {
@@ -137,7 +150,8 @@ func randomUint32() uint32 {
 }
 
 // randomSRTPKeySalt returns a fresh AES_CM_128_HMAC_SHA1_80 master key and
-// salt, used for the accessory's half of the SetupEndpoints exchange.
+// salt. The accessory does not mint its own — it echoes the controller's —
+// so this exists for tests that need a well-formed pair.
 func randomSRTPKeySalt() (key, salt []byte) {
 	key = make([]byte, 16)
 	salt = make([]byte, 14)

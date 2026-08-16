@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -373,4 +374,43 @@ func decodeSetupResponse(t *testing.T, encoded string) rtp.SetupEndpointsRespons
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	return resp
+}
+
+// The key the controller is told about must be the key the accessory
+// actually encrypts with. v0.9.1 answered with a freshly minted key while
+// encrypting with the controller's, so iOS decrypted garbage and tore the
+// stream down about two seconds in.
+func TestSetupResponseAdvertisesTheKeyWeEncryptWith(t *testing.T) {
+	sess := newHKStreamSession(testStreams[0], "vto1/0")
+
+	request := setupEndpointsRequest(t, 50000)
+	value, code := sess.svc.SetupEndpoints.C.SetValueRequest(
+		request, httptest.NewRequest(http.MethodPut, "/characteristics", nil))
+	if code != 0 {
+		t.Fatalf("SetupEndpoints write rejected with status %d", code)
+	}
+
+	resp := decodeSetupResponse(t, value.(string))
+	setup := sess.currentSetup()
+
+	if !bytes.Equal(resp.Video.MasterKey, setup.videoKey) {
+		t.Error("advertised video master key differs from the one used to encrypt")
+	}
+	if !bytes.Equal(resp.Video.MasterSalt, setup.videoSalt) {
+		t.Error("advertised video master salt differs from the one used to encrypt")
+	}
+
+	// And both must match what the controller sent, so the question of
+	// which side's key applies cannot arise at all.
+	var req rtp.SetupEndpoints
+	raw, err := base64.StdEncoding.DecodeString(request)
+	if err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if err := tlv8.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if !bytes.Equal(resp.Video.MasterKey, req.Video.MasterKey) {
+		t.Error("response does not echo the controller's video key")
+	}
 }
