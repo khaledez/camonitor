@@ -11,7 +11,7 @@
     "recipients": ["+15551234567", "+15557654321"]
   },
   "gree": {
-    "host": "192.168.88.44",
+    "mac": "502cc67b52eb",
     "port": 7000,
     "name": "Living Room AC"
   },
