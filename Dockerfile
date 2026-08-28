@@ -9,7 +9,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
 # ---- build stage ---------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 
 WORKDIR /src
 

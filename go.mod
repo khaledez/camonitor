@@ -1,20 +1,17 @@
 module camonitor
 
-go 1.26.2
-
-// Pion is the only non-stdlib dependency: WebRTC requires SCTP/DTLS/SRTP/ICE
-// stacks that aren't in the standard library and aren't worth re-implementing.
-// RTSP is small enough to hand-roll (see rtsp.go) so we don't pull in a
-// dedicated RTSP library.
-require (
-	github.com/pion/rtp v1.10.5
-	github.com/pion/webrtc/v4 v4.2.12
-)
+go 1.27.0
 
 require (
 	github.com/brutella/hap v0.0.35
 	github.com/emiago/sipgo v1.3.1
 	github.com/mdp/qrterminal/v3 v3.2.1
+	// WebRTC requires SCTP/DTLS/SRTP/ICE stacks that aren't in the standard
+	// library and aren't worth re-implementing. RTSP is small enough to
+	// hand-roll (see rtsp.go) so we don't pull in a dedicated RTSP library.
+	github.com/pion/rtp v1.10.5
+	github.com/pion/srtp/v3 v3.0.13
+	github.com/pion/webrtc/v4 v4.2.12
 	go.mau.fi/whatsmeow v0.0.0-20260506122147-6a7198d94d26
 	modernc.org/sqlite v1.50.0
 	rsc.io/qr v0.2.0
@@ -48,7 +45,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaissmai/bart v0.26.1 // indirect
 	github.com/go-chi/chi v1.5.4 // indirect
-	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced // indirect
+	github.com/go-json-experiment/json v0.0.0-20260820222146-c27c302e5fc3 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.3.2 // indirect
@@ -80,7 +77,6 @@ require (
 	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/sctp v1.9.5 // indirect
 	github.com/pion/sdp/v3 v3.0.18 // indirect
-	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/stun/v3 v3.1.2 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/pion/turn/v5 v5.0.3 // indirect
