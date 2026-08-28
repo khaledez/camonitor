@@ -21,6 +21,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/aes"
 	"encoding/base64"
@@ -32,7 +33,9 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +43,13 @@ const (
 	greeDefaultPort = 7000
 	greeGenericKey  = "a3K8Bx%2r8Y7#xDh"
 	greeUDPTimeout  = 4 * time.Second
+	// greeBroadcastAddr is where discovery scans go, so the unit is found
+	// wherever DHCP has put it rather than at a hard-coded address.
+	greeBroadcastAddr = "255.255.255.255"
+	// greeScanTimeout bounds a discovery scan. Every Gree unit on the LAN
+	// answers a broadcast scan, so we keep reading replies until this
+	// expires or the one we are looking for turns up.
+	greeScanTimeout = 2 * time.Second
 	// greePollInterval is how often we re-read the unit's status so the
 	// UI reflects changes made from the physical remote too.
 	greePollInterval = 10 * time.Second
@@ -48,12 +58,27 @@ const (
 	greeStatusTimeout = 4 * time.Second
 )
 
-// GreeConfig is the on-disk shape for a single Gree Wi-Fi unit.
+// GreeConfig is the on-disk shape for a single Gree Wi-Fi unit. Either
+// Host or MAC must be set; MAC is preferred because it survives a DHCP
+// lease change.
 type GreeConfig struct {
-	Host string `json:"host"`
+	// Host is the unit's address. With MAC set it is only a first guess:
+	// discovery falls back to a LAN broadcast when it does not answer.
+	Host string `json:"host,omitempty"`
+	// MAC is the unit's Wi-Fi MAC, which the Gree protocol also uses as
+	// the device id ("cid"). Separators and case are ignored. Setting it
+	// makes the connection independent of the unit's current IP.
+	MAC  string `json:"mac,omitempty"`
 	Port int    `json:"port,omitempty"`
-	// Name is shown in the web UI; defaults to the host when empty.
+	// Name is shown in the web UI; falls back to the host, then the MAC.
 	Name string `json:"name,omitempty"`
+}
+
+// greeNormalizeMAC strips the separators people write MACs with, so a
+// config value can be compared against the bare lowercase hex cid that
+// arrives on the wire.
+func greeNormalizeMAC(mac string) string {
+	return strings.ToLower(strings.NewReplacer(":", "", "-", "", ".", "").Replace(mac))
 }
 
 func (g GreeConfig) port() int {
@@ -102,19 +127,42 @@ type GreeStatus struct {
 }
 
 // greeClient owns the UDP socket and the per-device AES key. All methods
-// are safe for concurrent use; the socket + key are guarded by mu.
+// are safe for concurrent use; the socket, address and key are guarded
+// by mu.
 type greeClient struct {
-	host string
-	port int
+	// mac is the device id a scan reply must carry to be accepted. Empty
+	// means "trust whoever answers", which is the host-only config.
+	mac string
+	// scanTargets are the addresses a discovery scan is sent to, in order:
+	// the configured host first (answering directly saves waiting on the
+	// broadcast), then the LAN broadcast address.
+	scanTargets []string
 
 	mu   sync.Mutex
 	conn *net.UDPConn
+	// addr is where the unit answered from, learned during discovery.
+	addr *net.UDPAddr
 	cid  string
 	key  []byte
 }
 
 func newGreeClient(cfg GreeConfig) *greeClient {
-	return &greeClient{host: cfg.Host, port: cfg.port()}
+	port := strconv.Itoa(cfg.port())
+	var targets []string
+	if cfg.Host != "" {
+		targets = append(targets, net.JoinHostPort(cfg.Host, port))
+	}
+	targets = append(targets, net.JoinHostPort(greeBroadcastAddr, port))
+	return &greeClient{mac: greeNormalizeMAC(cfg.MAC), scanTargets: targets}
+}
+
+// reset forgets the unit's address and key so the next call rediscovers
+// it. A failed exchange most often means the unit picked up a new DHCP
+// lease; the next poll then heals the connection on its own.
+func (c *greeClient) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.addr, c.cid, c.key = nil, "", nil
 }
 
 // ensureKey performs the SCAN + BIND handshake once so subsequent status /
@@ -131,45 +179,28 @@ func (c *greeClient) ensureKey(ctx context.Context) error {
 
 // scanAndBindLocked runs the discovery handshake. Caller must hold mu.
 func (c *greeClient) scanAndBindLocked(ctx context.Context) error {
+	// 1. SCAN — locates the unit and fills in c.addr / c.cid.
+	if err := c.discoverLocked(ctx); err != nil {
+		return err
+	}
 	conn, err := c.connLocked()
 	if err != nil {
 		return err
 	}
-	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
-	if err != nil {
-		return err
-	}
-
-	// 1. SCAN — raw JSON, not a pack.
-	if err := c.sendLocked(ctx, conn, addr, []byte(`{"t":"scan"}`)); err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	// The scan response's pack is encrypted with the generic key.
-	scanResp, err := c.readPackLocked(ctx, conn, []byte(greeGenericKey))
-	if err != nil {
-		return fmt.Errorf("scan response: %w", err)
-	}
-	cid, _ := scanResp["cid"].(string)
-	if cid == "" {
-		cid, _ = scanResp["mac"].(string)
-	}
-	if cid == "" {
-		return errors.New("scan: no device id in response")
-	}
 
 	// 2. BIND — encrypted with the generic key.
-	bindInner, _ := json.Marshal(map[string]any{"mac": cid, "t": "bind", "uid": 0})
+	bindInner, _ := json.Marshal(map[string]any{"mac": c.cid, "t": "bind", "uid": 0})
 	enc, err := greeEncrypt(bindInner, []byte(greeGenericKey))
 	if err != nil {
 		return err
 	}
 	bindReq, _ := json.Marshal(map[string]any{
-		"cid": "app", "i": 1, "t": "pack", "uid": 0, "tcid": cid, "pack": enc,
+		"cid": "app", "i": 1, "t": "pack", "uid": 0, "tcid": c.cid, "pack": enc,
 	})
-	if err := c.sendLocked(ctx, conn, addr, bindReq); err != nil {
+	if err := c.sendLocked(ctx, conn, c.addr, bindReq); err != nil {
 		return fmt.Errorf("bind: %w", err)
 	}
-	bindResp, err := c.readPackLocked(ctx, conn, []byte(greeGenericKey))
+	bindResp, err := c.readReplyLocked(conn, []byte(greeGenericKey))
 	if err != nil {
 		return fmt.Errorf("bind response: %w", err)
 	}
@@ -178,20 +209,77 @@ func (c *greeClient) scanAndBindLocked(ctx context.Context) error {
 		return errors.New("bind: no key in response")
 	}
 
-	c.cid = cid
 	c.key = []byte(keyStr)
 	return nil
 }
 
-// connLocked returns the shared UDP socket, creating it if needed.
-func (c *greeClient) connLocked() (*net.UDPConn, error) {
-	if c.conn == nil {
-		conn, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return nil, err
-		}
-		c.conn = conn
+// discoverLocked finds the unit and records the address it answered from,
+// so a changed DHCP lease costs one scan instead of a config edit. The
+// scan is raw JSON, not a pack. Caller must hold mu.
+func (c *greeClient) discoverLocked(ctx context.Context) error {
+	conn, err := c.connLocked()
+	if err != nil {
+		return err
 	}
+	for _, target := range c.scanTargets {
+		addr, err := net.ResolveUDPAddr("udp4", target)
+		if err != nil {
+			return fmt.Errorf("scan target %q: %w", target, err)
+		}
+		if err := c.sendLocked(ctx, conn, addr, []byte(`{"t":"scan"}`)); err != nil {
+			return fmt.Errorf("scan %s: %w", target, err)
+		}
+	}
+
+	// Every unit on the LAN answers a broadcast scan, so keep reading
+	// until ours replies or the deadline passes.
+	deadline := time.Now().Add(greeScanTimeout)
+	for time.Now().Before(deadline) {
+		// The scan response's pack is encrypted with the generic key.
+		resp, src, err := c.readPackLocked(conn, []byte(greeGenericKey), deadline)
+		if err != nil {
+			break
+		}
+		cid, _ := resp["cid"].(string)
+		if cid == "" {
+			cid, _ = resp["mac"].(string)
+		}
+		isOurUnit := cid != "" && (c.mac == "" || greeNormalizeMAC(cid) == c.mac)
+		if !isOurUnit {
+			continue
+		}
+		c.addr, c.cid = src, cid
+		return nil
+	}
+	if c.mac != "" {
+		return fmt.Errorf("scan: no unit with mac %s answered", c.mac)
+	}
+	return errors.New("scan: no unit answered")
+}
+
+// connLocked returns the shared UDP socket, creating it if needed. It is
+// an IPv4 socket with SO_BROADCAST set, which is what lets discovery
+// reach a unit whose address we do not know yet.
+func (c *greeClient) connLocked() (*net.UDPConn, error) {
+	if c.conn != nil {
+		return c.conn, nil
+	}
+	lc := net.ListenConfig{
+		Control: func(_, _ string, rc syscall.RawConn) error {
+			var setErr error
+			if err := rc.Control(func(fd uintptr) {
+				setErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			}); err != nil {
+				return err
+			}
+			return setErr
+		},
+	}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", ":0")
+	if err != nil {
+		return nil, err
+	}
+	c.conn = pc.(*net.UDPConn)
 	return c.conn, nil
 }
 
@@ -205,34 +293,58 @@ func (c *greeClient) sendLocked(ctx context.Context, conn *net.UDPConn, addr *ne
 	return err
 }
 
-// readPackLocked parses the outer JSON envelope and decrypts its "pack"
-// field with the supplied key, returning the inner JSON object.
-func (c *greeClient) readPackLocked(ctx context.Context, conn *net.UDPConn, key []byte) (map[string]any, error) {
-	buf := make([]byte, 65535)
-	if err := conn.SetDeadline(time.Now().Add(greeUDPTimeout)); err != nil {
-		return nil, err
+// readReplyLocked reads until the unit we discovered answers, discarding
+// datagrams from anywhere else: a broadcast scan makes every other Gree
+// unit on the LAN reply too, and those replies land in the same socket.
+// Caller must hold mu.
+func (c *greeClient) readReplyLocked(conn *net.UDPConn, key []byte) (map[string]any, error) {
+	deadline := time.Now().Add(greeUDPTimeout)
+	lastErr := errors.New("no reply from the unit")
+	for time.Now().Before(deadline) {
+		resp, src, err := c.readPackLocked(conn, key, deadline)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !src.IP.Equal(c.addr.IP) || src.Port != c.addr.Port {
+			lastErr = fmt.Errorf("ignored a reply from %s", src)
+			continue
+		}
+		return resp, nil
 	}
-	n, _, err := conn.ReadFromUDP(buf)
+	return nil, lastErr
+}
+
+// readPackLocked reads one datagram before deadline, parses the outer
+// JSON envelope and decrypts its "pack" field with the supplied key. It
+// returns the inner JSON object and the address it came from — during
+// discovery that address is the unit's current one.
+func (c *greeClient) readPackLocked(conn *net.UDPConn, key []byte, deadline time.Time) (map[string]any, *net.UDPAddr, error) {
+	buf := make([]byte, 65535)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, nil, err
+	}
+	n, src, err := conn.ReadFromUDP(buf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var outer map[string]any
 	if err := json.Unmarshal(buf[:n], &outer); err != nil {
-		return nil, fmt.Errorf("bad envelope: %w", err)
+		return nil, nil, fmt.Errorf("bad envelope: %w", err)
 	}
 	pack, _ := outer["pack"].(string)
 	if pack == "" {
-		return nil, errors.New("envelope missing pack")
+		return nil, nil, errors.New("envelope missing pack")
 	}
 	dec, err := greeDecrypt(pack, key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var inner map[string]any
 	if err := json.Unmarshal(dec, &inner); err != nil {
-		return nil, fmt.Errorf("bad inner json: %w", err)
+		return nil, nil, fmt.Errorf("bad inner json: %w", err)
 	}
-	return inner, nil
+	return inner, src, nil
 }
 
 // request sends an inner JSON object as a pack encrypted with the device
@@ -261,14 +373,10 @@ func (c *greeClient) request(ctx context.Context, inner map[string]any) (map[str
 	if err != nil {
 		return nil, err
 	}
-	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
-	if err != nil {
+	if err := c.sendLocked(ctx, conn, c.addr, req); err != nil {
 		return nil, err
 	}
-	if err := c.sendLocked(ctx, conn, addr, req); err != nil {
-		return nil, err
-	}
-	return c.readPackLocked(ctx, conn, c.key)
+	return c.readReplyLocked(conn, c.key)
 }
 
 // statusColumns lists every parameter we care about, in the order the
@@ -298,6 +406,7 @@ func (c *greeClient) Status(ctx context.Context) GreeStatus {
 	resp, err := c.request(ctx, inner)
 	if err != nil {
 		log.Printf("gree: status failed: %v", err)
+		c.reset()
 		return st
 	}
 	cols, _ := resp["cols"].([]any)
@@ -352,6 +461,7 @@ func (c *greeClient) Set(ctx context.Context, params map[string]int) error {
 	inner := map[string]any{"opt": opt, "p": p, "t": "cmd"}
 	resp, err := c.request(ctx, inner)
 	if err != nil {
+		c.reset()
 		return err
 	}
 	if code, _ := resp["r"].(float64); code != 0 && code != 200 {
@@ -449,10 +559,7 @@ type GreeController struct {
 }
 
 func NewGreeController(cfg GreeConfig) *GreeController {
-	name := cfg.Name
-	if name == "" {
-		name = cfg.Host
-	}
+	name := cmp.Or(cfg.Name, cfg.Host, cfg.MAC)
 	return &GreeController{
 		client: newGreeClient(cfg),
 		name:   name,

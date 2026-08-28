@@ -175,6 +175,10 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: no streams configured", path)
 	}
 
+	if cfg.Gree != nil && cfg.Gree.Host == "" && cfg.Gree.MAC == "" {
+		return nil, fmt.Errorf("%s: gree needs a host or a mac", path)
+	}
+
 	seen := map[string]bool{}
 	for i, s := range cfg.Streams {
 		if s.ID == "" {

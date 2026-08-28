@@ -242,7 +242,7 @@ Gree Wi-Fi unit (the JSON-over-UDP "Gree Smart" protocol on port 7000):
 ```json
 {
   "gree": {
-    "host": "192.168.88.44",
+    "mac": "502cc67b52eb",
     "port": 7000,
     "name": "Living Room AC"
   }
@@ -251,9 +251,31 @@ Gree Wi-Fi unit (the JSON-over-UDP "Gree Smart" protocol on port 7000):
 
 | field  | required | meaning |
 | ------ | -------- | ------- |
-| `host` | yes      | AC IP/hostname. |
+| `mac`  | yes\*    | The unit's Wi-Fi MAC, which is also its Gree device id. Separators and case are ignored, so `50:2C:C6:7B:52:EB` works too. |
+| `host` | yes\*    | AC IP/hostname. Optional when `mac` is set. |
 | `port` | no       | UDP port. Defaults to `7000`. |
-| `name` | no       | Display label in the UI. Defaults to `host`. |
+| `name` | no       | Display label in the UI. Defaults to `host`, then `mac`. |
+
+\* At least one of `mac` and `host` is required.
+
+**Prefer `mac`.** With it set, camonitor finds the unit by broadcasting the
+Gree scan across the LAN and keeping the reply whose device id matches —
+so a new DHCP lease (a router swap, say) does not break the connection.
+The learned address is dropped after any failed exchange, so the next poll
+rediscovers the unit on its own, usually within ~10s. `host` alone keeps
+the old behaviour: talk to that address and nothing else.
+
+To find the MAC, look it up in your router's DHCP lease table, or ask every
+Gree unit on the LAN to introduce itself:
+
+```sh
+# The reply's "cid" is the MAC; the source address is where it lives today.
+echo -n '{"t":"scan"}' | nc -u -w2 -b 255.255.255.255 7000 | head -c 200
+```
+
+Discovery needs the broadcast to reach the unit's L2 segment. Under Docker
+that means `--network host`; under Kubernetes, `hostNetwork: true` (which
+the manifest in `deploy/k8s` already sets for SIP).
 
 A ❄ button appears in the header when a unit is configured. The panel shows
 current state (power, mode, set temp, fan speed, swing, room temp) and lets
@@ -363,7 +385,7 @@ The design is written up in
 
 ## Run from source
 
-Requires Go 1.26 or newer.
+Requires Go 1.27 or newer.
 
 ```sh
 go build -o camonitor .
