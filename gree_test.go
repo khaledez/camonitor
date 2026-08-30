@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // fakeGreeKey is the 16-byte AES key a fake unit hands out at bind time.
@@ -17,10 +19,19 @@ const fakeGreeKey = "testkeytestkey12"
 // generic-key pack, bind with a device key, and status with a fixed set
 // of columns. It exists so discovery can be exercised over real UDP
 // sockets without an air conditioner on the LAN.
+//
+// When broadcastOnly is set the unit binds 0.0.0.0 (so it also sees
+// broadcast traffic) and ignores the first bind request it receives. That
+// mimics a Gree firmware that never answers a unicast bind: the client's
+// unicast attempt times out, its broadcast fallback is the second bind
+// and succeeds. The unit still answers every scan and everything after
+// the bind.
 type fakeGreeUnit struct {
-	cid  string
-	addr string // "127.0.0.1:<port>"
-	conn *net.UDPConn
+	cid           string
+	addr          string // "127.0.0.1:<port>" (or "0.0.0.0:<port>" when broadcastOnly)
+	conn          *net.UDPConn
+	broadcastOnly bool
+	bindsSeen     int
 }
 
 func startFakeGreeUnit(t *testing.T, cid string) *fakeGreeUnit {
@@ -30,6 +41,21 @@ func startFakeGreeUnit(t *testing.T, cid string) *fakeGreeUnit {
 		t.Fatalf("listen: %v", err)
 	}
 	f := &fakeGreeUnit{cid: cid, addr: conn.LocalAddr().String(), conn: conn}
+	t.Cleanup(f.close)
+	go f.serve()
+	return f
+}
+
+// startBroadcastOnlyGreeUnit starts a unit that only answers a bind sent
+// to the broadcast address (see fakeGreeUnit.broadcastOnly). It binds
+// 0.0.0.0 so it also sees broadcast traffic on the returned port.
+func startBroadcastOnlyGreeUnit(t *testing.T, cid string) *fakeGreeUnit {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	f := &fakeGreeUnit{cid: cid, addr: conn.LocalAddr().String(), conn: conn, broadcastOnly: true}
 	t.Cleanup(f.close)
 	go f.serve()
 	return f
@@ -63,6 +89,14 @@ func (f *fakeGreeUnit) replyTo(req []byte) []byte {
 	// Bind arrives encrypted with the generic key, everything after it
 	// with the key this unit handed out.
 	if inner := unpack(pack, greeGenericKey); inner["t"] == "bind" {
+		if f.broadcastOnly {
+			f.bindsSeen++
+			if f.bindsSeen == 1 {
+				// First bind is the client's unicast attempt; a
+				// broadcast-only unit never answers that.
+				return nil
+			}
+		}
 		return f.pack(map[string]any{"t": "bindok", "mac": f.cid, "key": fakeGreeKey}, greeGenericKey)
 	}
 	inner := unpack(pack, fakeGreeKey)
@@ -177,6 +211,99 @@ func TestGreeAcceptsAnyUnitWhenNoMACIsConfigured(t *testing.T) {
 
 	if st := c.Status(context.Background()); !st.Online {
 		t.Fatal("unit reported offline, want a host-only config to work as before")
+	}
+}
+
+// broadcastReachable reports whether a UDP broadcast to the given port is
+// delivered on this host. The broadcast-only test needs real broadcast
+// delivery (a fake unit bound to 0.0.0.0 must hear a scan sent to
+// 255.255.255.255), which some CI containers lack; it skips rather than
+// fails there.
+func broadcastReachable(t *testing.T, port int) bool {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := conn.WriteToUDP([]byte(`{"t":"scan"}`), &net.UDPAddr{IP: net.IPv4(255, 255, 255, 255), Port: port}); err != nil {
+		return false
+	}
+	buf := make([]byte, 65535)
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return false
+		}
+		if bytes.Contains(buf[:n], []byte(`"pack"`)) {
+			return true
+		}
+	}
+}
+
+// TestGreeFallsBackToBroadcastForBroadcastOnlyUnit exercises the unit
+// whose firmware only answers a bind sent to the broadcast address: the
+// unicast bind must time out, the broadcast fallback must succeed, and
+// the client must remember to keep sending status/commands to broadcast.
+func TestGreeFallsBackToBroadcastForBroadcastOnlyUnit(t *testing.T) {
+	// A cid that does not collide with the real unit on this LAN, so the
+	// broadcast scan can only match the fake.
+	const cid = "aabbccddeeff"
+
+	// No host configured, so discovery scans the LAN broadcast and the
+	// fake (bound 0.0.0.0) sees it. The client must use the fake's port.
+	ac := startBroadcastOnlyGreeUnit(t, cid)
+	_, portStr, err := net.SplitHostPort(ac.addr)
+	if err != nil {
+		t.Fatalf("split %s: %v", ac.addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port %q: %v", portStr, err)
+	}
+	if !broadcastReachable(t, port) {
+		t.Skip("host cannot deliver UDP broadcast; skipping broadcast-only unit test")
+	}
+	c := newGreeClient(GreeConfig{MAC: cid, Port: port})
+
+	st := c.Status(context.Background())
+	if !st.Online {
+		t.Fatal("broadcast-only unit reported offline, want the broadcast fallback to bind and read status")
+	}
+	if !c.broadcastOnly {
+		t.Fatal("broadcastOnly not set, want the client to remember the unit only answers broadcast")
+	}
+	if st.SetTemp != 22 || st.RoomTemp != 26 {
+		t.Errorf("got set %d room %d, want set 22 room 26", st.SetTemp, st.RoomTemp)
+	}
+
+	// A second poll must keep working through the broadcast path (the
+	// bind is already done, so this exercises request()'s routing).
+	if st := c.Status(context.Background()); !st.Online {
+		t.Fatal("second status failed, want broadcast routing to persist")
+	}
+}
+
+// TestWorkCtxKeepsCancellationDropsDeadline pins down workCtx's contract:
+// the caller's deadline must not leak into the client's work (the client
+// bounds each protocol step itself), but cancelling the caller must still
+// cancel the work.
+func TestWorkCtxKeepsCancellationDropsDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelParent()
+
+	ctx, cancel := workCtx(parent)
+	defer cancel()
+
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("workCtx must drop the parent's deadline")
+	}
+	cancelParent()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("workCtx must propagate the parent's cancellation")
 	}
 }
 

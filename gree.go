@@ -56,6 +56,11 @@ const (
 	// greeStatusTimeout caps a single status read; a missed poll just
 	// marks the unit offline until the next attempt.
 	greeStatusTimeout = 4 * time.Second
+	// greeHandshakeTimeout bounds the whole discovery + bind handshake
+	// (scan + up to two binds). It is deliberately longer than a single
+	// status read so the broadcast fallback has room to complete on a
+	// cold start, even when the caller's status-read context is short.
+	greeHandshakeTimeout = 12 * time.Second
 )
 
 // GreeConfig is the on-disk shape for a single Gree Wi-Fi unit. Either
@@ -133,10 +138,17 @@ type greeClient struct {
 	// mac is the device id a scan reply must carry to be accepted. Empty
 	// means "trust whoever answers", which is the host-only config.
 	mac string
+	// port is the unit's UDP port (default 7000), used to build the
+	// broadcast address for units that only answer broadcast.
+	port int
 	// scanTargets are the addresses a discovery scan is sent to, in order:
 	// the configured host first (answering directly saves waiting on the
 	// broadcast), then the LAN broadcast address.
 	scanTargets []string
+	// broadcastOnly is set once we learn the unit only answers packets
+	// sent to the broadcast address (a unicast bind timed out but a
+	// broadcast bind succeeded). Some Gree firmwares behave this way.
+	broadcastOnly bool
 
 	mu   sync.Mutex
 	conn *net.UDPConn
@@ -147,13 +159,55 @@ type greeClient struct {
 }
 
 func newGreeClient(cfg GreeConfig) *greeClient {
-	port := strconv.Itoa(cfg.port())
+	port := cfg.port()
+	portStr := strconv.Itoa(port)
 	var targets []string
 	if cfg.Host != "" {
-		targets = append(targets, net.JoinHostPort(cfg.Host, port))
+		targets = append(targets, net.JoinHostPort(cfg.Host, portStr))
 	}
-	targets = append(targets, net.JoinHostPort(greeBroadcastAddr, port))
-	return &greeClient{mac: greeNormalizeMAC(cfg.MAC), scanTargets: targets}
+	targets = append(targets, net.JoinHostPort(greeBroadcastAddr, portStr))
+	return &greeClient{
+		mac:         greeNormalizeMAC(cfg.MAC),
+		port:        port,
+		scanTargets: targets,
+	}
+}
+
+// broadcastAddr is the LAN broadcast address on the unit's port. Units
+// whose firmware only answers broadcast (never unicast) need requests
+// sent here.
+func (c *greeClient) broadcastAddr() *net.UDPAddr {
+	addr, _ := net.ResolveUDPAddr("udp4", net.JoinHostPort(greeBroadcastAddr, strconv.Itoa(c.port)))
+	return addr
+}
+
+// sendTarget is where requests to the unit go: its unicast address
+// normally, or the LAN broadcast for units that only answer broadcast.
+// Both the bind handshake and every status/command use it, so the routing
+// decision lives in exactly one place.
+func (c *greeClient) sendTarget() *net.UDPAddr {
+	if c.broadcastOnly {
+		return c.broadcastAddr()
+	}
+	return c.addr
+}
+
+// workCtx returns a context that keeps the caller's cancellation but
+// drops its deadline, so the client's own per-step timeouts (handshake
+// vs status read) apply. The caller's deadline is a UI-level bound and is
+// too short to cover a cold start that needs a full handshake.
+func workCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// isTimeout reports whether err is a network timeout (e.g. a UDP read
+// that hit its deadline). Only a timeout means "the unit ignored the
+// request", which is what triggers the broadcast fallback.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // reset forgets the unit's address and key so the next call rediscovers
@@ -174,7 +228,11 @@ func (c *greeClient) ensureKey(ctx context.Context) error {
 	if c.key != nil {
 		return nil
 	}
-	return c.scanAndBindLocked(ctx)
+	// The handshake (scan + up to two binds) can outlive the caller's
+	// status-read budget; give it its own, longer deadline.
+	hsCtx, cancel := context.WithTimeout(ctx, greeHandshakeTimeout)
+	defer cancel()
+	return c.scanAndBindLocked(hsCtx)
 }
 
 // scanAndBindLocked runs the discovery handshake. Caller must hold mu.
@@ -188,7 +246,13 @@ func (c *greeClient) scanAndBindLocked(ctx context.Context) error {
 		return err
 	}
 
-	// 2. BIND — encrypted with the generic key.
+	// 2. BIND — encrypted with the generic key. Most units answer a
+	// unicast bind, but some firmwares (e.g. this unit's V1.2.1) only
+	// answer when the request is sent to the broadcast address. A known
+	// broadcast-only unit skips straight to broadcast; otherwise try
+	// unicast first and fall back to broadcast on a timeout. The mode is
+	// remembered so status/commands keep going the same way, and it is
+	// re-learned if the unit turns out to have been replaced.
 	bindInner, _ := json.Marshal(map[string]any{"mac": c.cid, "t": "bind", "uid": 0})
 	enc, err := greeEncrypt(bindInner, []byte(greeGenericKey))
 	if err != nil {
@@ -197,20 +261,50 @@ func (c *greeClient) scanAndBindLocked(ctx context.Context) error {
 	bindReq, _ := json.Marshal(map[string]any{
 		"cid": "app", "i": 1, "t": "pack", "uid": 0, "tcid": c.cid, "pack": enc,
 	})
-	if err := c.sendLocked(ctx, conn, c.addr, bindReq); err != nil {
-		return fmt.Errorf("bind: %w", err)
-	}
-	bindResp, err := c.readReplyLocked(conn, []byte(greeGenericKey))
+	keyStr, err := c.bindLocked(ctx, conn, bindReq, c.sendTarget())
 	if err != nil {
-		return fmt.Errorf("bind response: %w", err)
-	}
-	keyStr, _ := bindResp["key"].(string)
-	if keyStr == "" {
-		return errors.New("bind: no key in response")
+		if c.broadcastOnly {
+			// Sticky mode but the unit stopped answering broadcast: it
+			// may have been replaced by one that answers unicast. Try
+			// unicast, and forget the broadcast-only mode if it answers.
+			keyStr, err = c.bindLocked(ctx, conn, bindReq, c.addr)
+			if err != nil {
+				return err
+			}
+			c.broadcastOnly = false
+		} else if isTimeout(err) {
+			// The unit may only accept broadcast. Try that before giving
+			// up; a timeout (not any error) is what tells us it ignored
+			// the unicast request.
+			keyStr, err = c.bindLocked(ctx, conn, bindReq, c.broadcastAddr())
+			if err != nil {
+				return err
+			}
+			c.broadcastOnly = true
+		} else {
+			return err
+		}
 	}
 
 	c.key = []byte(keyStr)
 	return nil
+}
+
+// bindLocked sends a bind request to target and returns the device key
+// from the reply. Caller must hold mu.
+func (c *greeClient) bindLocked(ctx context.Context, conn *net.UDPConn, bindReq []byte, target *net.UDPAddr) (string, error) {
+	if err := c.sendLocked(ctx, conn, target, bindReq); err != nil {
+		return "", fmt.Errorf("bind: %w", err)
+	}
+	bindResp, err := c.readReplyLocked(ctx, conn, []byte(greeGenericKey))
+	if err != nil {
+		return "", fmt.Errorf("bind response: %w", err)
+	}
+	keyStr, _ := bindResp["key"].(string)
+	if keyStr == "" {
+		return "", errors.New("bind: no key in response")
+	}
+	return keyStr, nil
 }
 
 // discoverLocked finds the unit and records the address it answered from,
@@ -235,8 +329,11 @@ func (c *greeClient) discoverLocked(ctx context.Context) error {
 	// until ours replies or the deadline passes.
 	deadline := time.Now().Add(greeScanTimeout)
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		// The scan response's pack is encrypted with the generic key.
-		resp, src, err := c.readPackLocked(conn, []byte(greeGenericKey), deadline)
+		resp, src, err := c.readPackLocked(ctx, conn, []byte(greeGenericKey), deadline)
 		if err != nil {
 			break
 		}
@@ -297,11 +394,14 @@ func (c *greeClient) sendLocked(ctx context.Context, conn *net.UDPConn, addr *ne
 // datagrams from anywhere else: a broadcast scan makes every other Gree
 // unit on the LAN reply too, and those replies land in the same socket.
 // Caller must hold mu.
-func (c *greeClient) readReplyLocked(conn *net.UDPConn, key []byte) (map[string]any, error) {
+func (c *greeClient) readReplyLocked(ctx context.Context, conn *net.UDPConn, key []byte) (map[string]any, error) {
 	deadline := time.Now().Add(greeUDPTimeout)
 	lastErr := errors.New("no reply from the unit")
 	for time.Now().Before(deadline) {
-		resp, src, err := c.readPackLocked(conn, key, deadline)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, src, err := c.readPackLocked(ctx, conn, key, deadline)
 		if err != nil {
 			lastErr = err
 			continue
@@ -319,7 +419,13 @@ func (c *greeClient) readReplyLocked(conn *net.UDPConn, key []byte) (map[string]
 // JSON envelope and decrypts its "pack" field with the supplied key. It
 // returns the inner JSON object and the address it came from — during
 // discovery that address is the unit's current one.
-func (c *greeClient) readPackLocked(conn *net.UDPConn, key []byte, deadline time.Time) (map[string]any, *net.UDPAddr, error) {
+func (c *greeClient) readPackLocked(ctx context.Context, conn *net.UDPConn, key []byte, deadline time.Time) (map[string]any, *net.UDPAddr, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
 	buf := make([]byte, 65535)
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, nil, err
@@ -373,10 +479,10 @@ func (c *greeClient) request(ctx context.Context, inner map[string]any) (map[str
 	if err != nil {
 		return nil, err
 	}
-	if err := c.sendLocked(ctx, conn, c.addr, req); err != nil {
+	if err := c.sendLocked(ctx, conn, c.sendTarget(), req); err != nil {
 		return nil, err
 	}
-	return c.readReplyLocked(conn, c.key)
+	return c.readReplyLocked(ctx, conn, c.key)
 }
 
 // statusColumns lists every parameter we care about, in the order the
@@ -391,6 +497,12 @@ var statusColumns = []string{
 // set false if the unit is unreachable.
 func (c *greeClient) Status(ctx context.Context) GreeStatus {
 	st := GreeStatus{Configured: true}
+	// The caller's deadline is a UI-level bound; the client bounds each
+	// protocol step itself (handshake vs status read). Keep the caller's
+	// cancellation but not its deadline, so a cold start that needs a
+	// handshake isn't truncated mid-bind.
+	ctx, cancel := workCtx(ctx)
+	defer cancel()
 	if err := c.ensureKey(ctx); err != nil {
 		log.Printf("gree: status failed: %v", err)
 		return st
@@ -445,6 +557,11 @@ func (c *greeClient) Status(ctx context.Context) GreeStatus {
 // used by the HTTP API (power, mode, temp, fan, air, health, sleep, light,
 // swing, quiet, turbo, energy) and are translated to Gree protocol columns.
 func (c *greeClient) Set(ctx context.Context, params map[string]int) error {
+	// Same as Status: the caller's deadline is a UI-level bound; the
+	// client bounds the handshake and the command read itself.
+	ctx, cancel := workCtx(ctx)
+	defer cancel()
+
 	opt := make([]string, 0, len(params))
 	p := make([]int, 0, len(params))
 	for k, v := range params {
