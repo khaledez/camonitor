@@ -192,13 +192,18 @@ func (c *greeClient) sendTarget() *net.UDPAddr {
 	return c.addr
 }
 
-// workCtx returns a context that keeps the caller's cancellation but
-// drops its deadline, so the client's own per-step timeouts (handshake
+// workCtx returns a context that keeps the caller's explicit cancellation
+// but drops its deadline, so the client's own per-step timeouts (handshake
 // vs status read) apply. The caller's deadline is a UI-level bound and is
-// too short to cover a cold start that needs a full handshake.
+// too short to cover a cold start that needs a full handshake, so a
+// deadline expiry must not cancel the work — only an explicit cancel does.
 func workCtx(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
-	stop := context.AfterFunc(parent, cancel)
+	stop := context.AfterFunc(parent, func() {
+		if parent.Err() == context.Canceled {
+			cancel()
+		}
+	})
 	return ctx, func() { stop(); cancel() }
 }
 

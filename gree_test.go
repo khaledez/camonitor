@@ -287,15 +287,12 @@ func TestGreeFallsBackToBroadcastForBroadcastOnlyUnit(t *testing.T) {
 
 // TestWorkCtxKeepsCancellationDropsDeadline pins down workCtx's contract:
 // the caller's deadline must not leak into the client's work (the client
-// bounds each protocol step itself), but cancelling the caller must still
-// cancel the work.
+// bounds each protocol step itself), and a deadline expiry must not cancel
+// the work — only an explicit cancel does.
 func TestWorkCtxKeepsCancellationDropsDeadline(t *testing.T) {
-	parent, cancelParent := context.WithTimeout(context.Background(), time.Hour)
-	defer cancelParent()
-
+	// Explicit cancellation propagates.
+	parent, cancelParent := context.WithCancel(context.Background())
 	ctx, cancel := workCtx(parent)
-	defer cancel()
-
 	if _, ok := ctx.Deadline(); ok {
 		t.Fatal("workCtx must drop the parent's deadline")
 	}
@@ -304,6 +301,48 @@ func TestWorkCtxKeepsCancellationDropsDeadline(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("workCtx must propagate the parent's cancellation")
+	}
+	cancel()
+
+	// A deadline expiry must NOT cancel the work context.
+	parent, cancelParent = context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelParent()
+	ctx, cancel = workCtx(parent)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("workCtx must not propagate a deadline expiry")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestGreeBroadcastOnlyUnitSurvivesCallerDeadline is the regression test
+// for the "still unreachable after deploy" bug: the poll loop hands Status
+// a short deadline (greeStatusTimeout), and a broadcast-only handshake
+// (scan + 4s unicast timeout + broadcast bind) outlives it. A deadline
+// expiry must not cancel the handshake, or the unit never comes online.
+func TestGreeBroadcastOnlyUnitSurvivesCallerDeadline(t *testing.T) {
+	const cid = "aabbccddeeff"
+	ac := startBroadcastOnlyGreeUnit(t, cid)
+	_, portStr, err := net.SplitHostPort(ac.addr)
+	if err != nil {
+		t.Fatalf("split %s: %v", ac.addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port %q: %v", portStr, err)
+	}
+	if !broadcastReachable(t, port) {
+		t.Skip("host cannot deliver UDP broadcast; skipping broadcast-only unit test")
+	}
+	c := newGreeClient(GreeConfig{MAC: cid, Port: port})
+
+	// A deadline far shorter than the handshake, mirroring the poll
+	// loop's greeStatusTimeout. The handshake must still complete.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if st := c.Status(ctx); !st.Online {
+		t.Fatal("broadcast-only unit reported offline under a short caller deadline; the deadline must not cancel the handshake")
 	}
 }
 
