@@ -62,13 +62,13 @@ type trackWriter interface {
 	WriteRTP(*rtp.Packet) error
 }
 
-// streamTargets bundles the per-stream sinks runRTSPReader writes into. The
-// audioWriter is nil if the stream's SDP advertised no audio media (or we
-// don't know how to handle it). A non-nil audioWriter may include codec
-// transcoding (e.g. L16/16000 → PCMA/8000) — see transcode.go.
+// streamTargets bundles the per-stream sinks runRTSPReader writes into.
+// audioTrack is nil for callers that want video only. It expects PCMA/8000;
+// whatever codec the SDP negotiates is converted to that on the way in —
+// see audioForwarder in transcode.go.
 type streamTargets struct {
-	videoTrack  trackWriter
-	audioWriter func(*rtp.Packet) error
+	videoTrack trackWriter
+	audioTrack trackWriter
 }
 
 // runRTSPReader keeps a stream connected with bounded exponential backoff
@@ -134,11 +134,11 @@ func streamOnce(ctx context.Context, s StreamConfig, subtype int, targets stream
 	defer close(closeOnDone)
 
 	rc := newRTSPConn(conn, u)
-	if err := rc.handshake(); err != nil {
+	if err := rc.handshake(targets); err != nil {
 		return err
 	}
 
-	hasAudio := rc.audioControlURL != ""
+	hasAudio := rc.audioWriter != nil
 	log.Printf("[%s] connected to %s; %s video%s",
 		s.ID, redact(u), rc.videoCodec,
 		map[bool]string{true: " + audio", false: ""}[hasAudio])
@@ -195,10 +195,10 @@ type rtspConn struct {
 	cseq    int
 	session string // returned in SETUP, sent on subsequent requests
 
-	// audioControlURL records whether the SDP advertised an audio media
-	// we successfully SETUP'd. Used by readPackets to decide whether to
-	// invoke targets.audioWriter on chanAudioRTP frames.
-	audioControlURL string
+	// audioWriter converts and forwards audio RTP to the caller's track.
+	// It is nil unless the SDP advertised an audio media in a codec we can
+	// convert and that media's SETUP succeeded.
+	audioWriter func(*rtp.Packet) error
 
 	// videoCodec is the codec name ("H264" or "H265") of the video media
 	// we SETUP'd, for logging.
@@ -229,7 +229,7 @@ func newRTSPConn(conn net.Conn, source *url.URL) *rtspConn {
 // After it returns the connection is ready to deliver interleaved RTP frames
 // for any media that was successfully set up. Audio is best-effort: we only
 // SETUP it if the SDP advertised one of the codecs we know how to handle.
-func (rc *rtspConn) handshake() error {
+func (rc *rtspConn) handshake(targets streamTargets) error {
 	if _, err := rc.do("OPTIONS", rc.requestURI.String(), nil); err != nil {
 		return fmt.Errorf("OPTIONS: %w", err)
 	}
@@ -265,7 +265,13 @@ func (rc *rtspConn) handshake() error {
 		return errors.New("SETUP: missing Session header")
 	}
 
-	if audio != nil {
+	forwardAudio := func() func(*rtp.Packet) error {
+		if audio == nil || targets.audioTrack == nil {
+			return nil
+		}
+		return audioForwarder(audio.codec, targets.audioTrack)
+	}()
+	if forwardAudio != nil {
 		if _, err := rc.do("SETUP", audio.controlURL, map[string]string{
 			"Transport": fmt.Sprintf("RTP/AVP/TCP;unicast;interleaved=%d-%d", chanAudioRTP, chanAudioRTCP),
 		}); err != nil {
@@ -273,7 +279,7 @@ func (rc *rtspConn) handshake() error {
 			// continue with video-only.
 			log.Printf("SETUP audio (%s): %v — continuing video-only", audio.codec, err)
 		} else {
-			rc.audioControlURL = audio.controlURL
+			rc.audioWriter = forwardAudio
 		}
 	}
 
@@ -287,8 +293,8 @@ func (rc *rtspConn) handshake() error {
 
 // readPackets routes incoming RTP frames to the right sink. Channel 0 is
 // the video RTP stream → targets.videoTrack. Channel 2 is audio RTP →
-// targets.audioWriter (which may be a transcoder). RTCP frames (channels
-// 1 and 3) are silently discarded.
+// rc.audioWriter, the codec conversion chosen during the handshake. RTCP
+// frames (channels 1 and 3) are silently discarded.
 func (rc *rtspConn) readPackets(targets streamTargets) error {
 	pkt := &rtp.Packet{}
 	for {
@@ -305,10 +311,10 @@ func (rc *rtspConn) readPackets(targets streamTargets) error {
 		case chanVideoRTP:
 			write = targets.videoTrack.WriteRTP
 		case chanAudioRTP:
-			if rc.audioControlURL == "" || targets.audioWriter == nil {
+			if rc.audioWriter == nil {
 				continue
 			}
-			write = targets.audioWriter
+			write = rc.audioWriter
 		default:
 			continue // RTCP or unexpected channel
 		}
@@ -611,7 +617,7 @@ func findMedia(sdp, baseURI string) (video rtspMedia, audio *rtspMedia, err erro
 			if audio != nil {
 				continue
 			}
-			codec := pick(m, "L16", "PCMA", "PCMU")
+			codec := pick(m, audioCodecs...)
 			if codec == "" || m.control == "" {
 				continue
 			}

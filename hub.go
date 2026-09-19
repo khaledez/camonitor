@@ -147,8 +147,8 @@ func (h *Hub) startReader(streamID, quality string) {
 
 	s := h.streamsByID[streamID]
 	targets := streamTargets{
-		videoTrack:  h.videoTracks[streamID],
-		audioWriter: l16ToPCMAForwarder(h.audioTracks[streamID]),
+		videoTrack: h.videoTracks[streamID],
+		audioTrack: h.audioTracks[streamID],
 	}
 	subtype := subtypeFor(quality)
 	go func() {
