@@ -8,9 +8,17 @@ or any other extension — doesn't have to repeat the discovery work.
 
 | Role | IP | Model | Firmware |
 |---|---|---|---|
-| Main VTO (Front Door) | `192.168.88.200` | `DHI-VTO3211D-P1-S2` | `4.500.0000002.0.R` |
-| Sub VTO (Gate) | `192.168.88.202` | `VTO3311Q-WP` | `4.510.0000002.1.R` |
+| Main VTO (Front Door) | `192.168.88.200` | `DHI-VTO3311Q-WP` | `4.800.0000000.4.R` (build 2025-03-07) |
+| Sub VTO (Gate) | `192.168.88.202` | `DHI-VTO3311Q-WP` | `4.810.0000000.3.R` (build 2026-05-28) |
 | Indoor VTH | `192.168.88.201` | `VTH2421F_R` | `4.410.0.0` |
+
+Both VTOs are now the same model — `.200` was previously a `DHI-VTO3211D-P1-S2` and has
+since been replaced. Read back from the devices with:
+
+    curl -s -u admin:PASS --digest \
+      'http://192.168.88.200/cgi-bin/magicBox.cgi?action=getDeviceType'
+    curl -s -u admin:PASS --digest \
+      'http://192.168.88.200/cgi-bin/magicBox.cgi?action=getSoftwareVersion'
 
 The main vs sub designation is a *Dahua-internal* concept: each VTO has a
 `SIP.IsMainVTO` flag; one device in the cluster runs the SIP registrar
