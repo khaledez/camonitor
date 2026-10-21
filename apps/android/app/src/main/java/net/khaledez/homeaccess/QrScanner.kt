@@ -2,7 +2,9 @@ package net.khaledez.homeaccess
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Camera preview that reports the first QR code it sees, once, on the main thread.
  * Renders nothing until the CAMERA permission is granted; the caller requests it.
  */
+@androidx.annotation.OptIn(ExperimentalGetImage::class)
 @Composable
 fun QrScanner(onCode: (String) -> Unit) {
     val context = LocalContext.current
@@ -50,43 +53,45 @@ fun QrScanner(onCode: (String) -> Unit) {
     DisposableEffect(lifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider? = null
+        var disposed = false
 
         providerFuture.addListener({
-            provider = providerFuture.get()
-
-            val preview = Preview.Builder().build()
-            preview.setSurfaceProvider(previewView.surfaceProvider)
-
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-            analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                val mediaImage = imageProxy.image
-                if (mediaImage == null || reported.get()) {
-                    imageProxy.close()
-                    return@setAnalyzer
-                }
-                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                scanner.process(image)
-                    .addOnSuccessListener { barcodes -> // delivered on the main thread
-                        val value = barcodes.firstNotNullOfOrNull { it.rawValue }
-                        if (value != null && reported.compareAndSet(false, true)) {
-                            currentOnCode(value)
-                        }
-                    }
-                    .addOnCompleteListener { imageProxy.close() }
-            }
-
-            // No camera on the device: show nothing rather than crash.
+            if (disposed) return@addListener
+            // No camera or CameraX init failure: show nothing rather than crash.
             try {
-                provider?.unbindAll()
+                provider = providerFuture.get()
+
+                val preview = Preview.Builder().build()
+                preview.setSurfaceProvider(previewView.surfaceProvider)
+
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                    val mediaImage = imageProxy.image
+                    if (mediaImage == null || reported.get()) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
+                    val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                    scanner.process(image)
+                        .addOnSuccessListener { barcodes -> // delivered on the main thread
+                            val value = barcodes.firstNotNullOfOrNull { it.rawValue }
+                            if (value != null && reported.compareAndSet(false, true)) {
+                                currentOnCode(value)
+                            }
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
+
                 provider?.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
             } catch (e: Exception) {
-                // intentionally ignored: parent offers the manual fallback
+                Log.w("QrScanner", "Camera unavailable; parent offers the manual fallback", e)
             }
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
+            disposed = true
             provider?.unbindAll()
             scanner.close()
             analysisExecutor.shutdown()
