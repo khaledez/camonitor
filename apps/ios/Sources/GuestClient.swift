@@ -60,3 +60,11 @@ struct GuestClient {
         }
     }
 }
+
+protocol GuestClientProtocol {
+    func enroll(code: String) async throws -> String
+    func openGate(token: String) async throws
+    func openOutdoor(token: String) async throws
+}
+
+extension GuestClient: GuestClientProtocol {}
