@@ -20,6 +20,7 @@ enum SessionStore {
         clear()
         var item = identity
         item[kSecValueData as String] = try JSONEncoder().encode(s)
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(item as CFDictionary, nil)
         if status != errSecSuccess { throw KeychainError(status: status) }
     }

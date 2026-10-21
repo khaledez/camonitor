@@ -13,6 +13,8 @@ final class AppModel: ObservableObject {
     var makeClient: (URL) -> GuestClientProtocol = { GuestClient(apiBase: $0) }
     private var session: Session?
     private var client: GuestClientProtocol?
+    // Stops a rejected QR left in the camera frame from re-POSTing on every re-arm.
+    private var lastRejectedCode: String?
 
     init() {
         session = SessionStore.load()
@@ -24,6 +26,7 @@ final class AppModel: ObservableObject {
             enrollError = "That QR code is not a valid invite."
             return
         }
+        if invite.code == lastRejectedCode { return }
         let newClient = makeClient(invite.apiBase)
         do {
             let token = try await newClient.enroll(code: invite.code)
@@ -32,10 +35,13 @@ final class AppModel: ObservableObject {
             session = newSession
             client = newClient
             enrollError = nil
+            lastRejectedCode = nil
             phase = .enrolled
         } catch GuestError.badCode {
+            lastRejectedCode = invite.code
             enrollError = "Invite expired or already used."
         } catch {
+            lastRejectedCode = invite.code
             enrollError = "Could not enroll. Check your connection and try again."
         }
     }

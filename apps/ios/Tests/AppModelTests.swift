@@ -5,13 +5,14 @@ private final class FakeClient: GuestClientProtocol {
     var enrollResult: Result<String, GuestError> = .success("tok")
     var openError: GuestError?
     var enrollCalls = 0
+    var lastToken: String?
 
     func enroll(code: String) async throws -> String {
         enrollCalls += 1
         return try enrollResult.get()
     }
-    func openGate(token: String) async throws { if let openError { throw openError } }
-    func openOutdoor(token: String) async throws { if let openError { throw openError } }
+    func openGate(token: String) async throws { lastToken = token; if let openError { throw openError } }
+    func openOutdoor(token: String) async throws { lastToken = token; if let openError { throw openError } }
 }
 
 @MainActor
@@ -77,5 +78,41 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .enrolled)
         XCTAssertNotNil(model.actionStatus)
         XCTAssertFalse(model.actionSucceeded)
+    }
+
+    func testSameRejectedCodeIsNotResubmitted() async {
+        fake.enrollResult = .failure(.badCode)
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        await model.handleScanned(validQR)
+        XCTAssertEqual(fake.enrollCalls, 1)
+        XCTAssertEqual(model.phase, .needsEnrollment)
+    }
+
+    func testDifferentCodeAfterRejectionIsSubmitted() async {
+        fake.enrollResult = .failure(.badCode)
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        await model.handleScanned("https://api.example.com/guest/enroll?code=other")
+        XCTAssertEqual(fake.enrollCalls, 2)
+    }
+
+    func testOpenCallsReceiveStoredToken() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        await model.openGate()
+        XCTAssertEqual(fake.lastToken, "tok")
+        fake.lastToken = nil
+        await model.openOutdoor()
+        XCTAssertEqual(fake.lastToken, "tok")
+    }
+
+    func testOpenOutdoorSuccessKeepsEnrolledAndSetsStatus() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        await model.openOutdoor()
+        XCTAssertEqual(model.phase, .enrolled)
+        XCTAssertTrue(model.actionSucceeded)
+        XCTAssertNotNil(model.actionStatus)
     }
 }

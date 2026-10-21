@@ -16,6 +16,12 @@ struct HomeView: View {
             }
         }
         .padding()
+        // Success is a transient checkmark; failures stay until the next tap.
+        .task(id: model.actionStatus) {
+            guard model.actionSucceeded, model.actionStatus != nil else { return }
+            try? await Task.sleep(for: .seconds(2))
+            if !Task.isCancelled { model.actionStatus = nil }
+        }
     }
 
     private func doorButton(_ title: String, action: @escaping () async -> Void) -> some View {
