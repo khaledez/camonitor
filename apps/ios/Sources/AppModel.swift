@@ -41,7 +41,6 @@ final class AppModel: ObservableObject {
             lastRejectedCode = invite.code
             enrollError = "Invite expired or already used."
         } catch {
-            lastRejectedCode = invite.code
             enrollError = "Could not enroll. Check your connection and try again."
         }
     }

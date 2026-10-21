@@ -115,4 +115,12 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.actionSucceeded)
         XCTAssertNotNil(model.actionStatus)
     }
+
+    func testSameCodeIsRetriedAfterNetworkFailure() async {
+        fake.enrollResult = .failure(.network)
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        await model.handleScanned(validQR)
+        XCTAssertEqual(fake.enrollCalls, 2)
+    }
 }
