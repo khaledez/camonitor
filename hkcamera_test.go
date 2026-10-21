@@ -105,7 +105,7 @@ func TestManagerPublishesOneCameraServerPerDoor(t *testing.T) {
 	bell, fetch := testBellBus(t)
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
 
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, "", bell, fetch)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestSetupCodeSurvivesUntilEveryAccessoryIsPaired(t *testing.T) {
 	bell, fetch := testBellBus(t)
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
 
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, "", bell, fetch)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestEachAccessoryServesItsOwnQR(t *testing.T) {
 	bell, fetch := testBellBus(t)
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
 
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, "", bell, fetch)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestPairingOneAccessoryLeavesTheOthersPairable(t *testing.T) {
 	bell, fetch := testBellBus(t)
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: 51826, Store: t.TempDir()}
 
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, bell, fetch)
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, "", bell, fetch)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}

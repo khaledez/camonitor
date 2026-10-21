@@ -52,7 +52,7 @@ func newLiveManager(t *testing.T, port int) *HomeKitManager {
 	t.Helper()
 	cfg := HomeKitConfig{Pin: "031-45-154", Port: port, Store: t.TempDir()}
 	// nil bell/snapshot: bridge only, so these tests bind exactly one port.
-	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, nil)
+	m, err := NewHomeKitManager(cfg, testStreams, &fakeDoors{}, &fakeGree{name: "AC", status: off}, nil, "", nil, nil)
 	if err != nil {
 		t.Fatalf("NewHomeKitManager: %v", err)
 	}

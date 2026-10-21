@@ -227,6 +227,7 @@ type HomeKitManager struct {
 	pin     string // eight digits, no dashes
 	servers []*hkServer
 	climate *hkClimate
+	gate    *hkGate
 	cameras []*hkCamera
 	bell    *BellBus
 }
@@ -238,7 +239,7 @@ type HomeKitManager struct {
 //
 // bell and snapshot may be nil, in which case the camera accessories are
 // skipped and only the bridge is published.
-func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpener, gree greeDevice, bell *BellBus, snapshot snapshotFetcher) (*HomeKitManager, error) {
+func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpener, gree greeDevice, gate gateController, gateName string, bell *BellBus, snapshot snapshotFetcher) (*HomeKitManager, error) {
 	pin, err := normalizePin(cfg.Pin)
 	if err != nil {
 		return nil, err
@@ -248,7 +249,7 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 		return nil, err
 	}
 
-	bridge, children, climate := buildBridgeAccessories(streams, doors, gree, relock)
+	bridge, children, climate, gateAcc := buildBridgeAccessories(streams, doors, gree, gate, gateName, relock)
 	bridgeSrv, err := newHKServer(cfg, pin, bridgeName, "bridge", cfg.port(),
 		accessory.TypeBridge, bridge, children...)
 	if err != nil {
@@ -259,6 +260,7 @@ func NewHomeKitManager(cfg HomeKitConfig, streams []StreamConfig, doors doorOpen
 		pin:     pin,
 		servers: []*hkServer{bridgeSrv},
 		climate: climate,
+		gate:    gateAcc,
 		bell:    bell,
 	}
 
@@ -353,20 +355,26 @@ func openPairingStore(dir string) (hap.Store, error) {
 // network until the record ages out. That is not hypothetical here — the
 // deployment uses the Recreate strategy, so every redeploy would leave
 // one behind.
-func newHomeKit(cfg *Config, doors doorOpener, gree *GreeController, bell *BellBus, snapshot snapshotFetcher) *HomeKitManager {
+func newHomeKit(cfg *Config, doors doorOpener, gree *GreeController, centsys *CentsysController, bell *BellBus, snapshot snapshotFetcher) *HomeKitManager {
 	if cfg.HomeKit == nil {
 		log.Printf("homekit: not configured (skipping)")
 		return nil
 	}
 
 	// A nil *GreeController held in an interface is not a nil interface,
-	// so the conversion has to be explicit.
+	// so the conversion has to be explicit. Same for the gate.
 	var greeDev greeDevice
 	if gree != nil {
 		greeDev = gree
 	}
+	var gateDev gateController
+	gateName := ""
+	if centsys != nil {
+		gateDev = centsys
+		gateName = centsys.Name()
+	}
 
-	m, err := NewHomeKitManager(*cfg.HomeKit, cfg.Streams, doors, greeDev, bell, snapshot)
+	m, err := NewHomeKitManager(*cfg.HomeKit, cfg.Streams, doors, greeDev, gateDev, gateName, bell, snapshot)
 	if err != nil {
 		if errors.Is(err, errHomeKitStore) {
 			log.Printf("homekit: %v — disabled; doors and web UI unaffected", err)
@@ -377,6 +385,9 @@ func newHomeKit(cfg *Config, doors doorOpener, gree *GreeController, bell *BellB
 
 	if climate := m.Climate(); climate != nil {
 		gree.OnUpdate(climate.Update)
+	}
+	if m.gate != nil {
+		centsys.OnUpdate(m.gate.Update)
 	}
 	return m
 }

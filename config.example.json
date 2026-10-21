@@ -15,6 +15,11 @@
     "port": 7000,
     "name": "Living Room AC"
   },
+  "centsys": {
+    "phone": "+27831234567",
+    "name": "Gate",
+    "session": "/var/lib/camonitor/centsys.json"
+  },
   "homekit": {
     "pin": "031-45-154",
     "port": 51826,

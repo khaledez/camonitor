@@ -45,7 +45,7 @@ var testStreams = []StreamConfig{
 
 func TestBridgeExposesOneLockPerDoorPlusClimate(t *testing.T) {
 	gree := &fakeGree{name: "Living Room AC"}
-	bridge, children, climate := buildBridgeAccessories(testStreams, &fakeDoors{}, gree, 5*time.Second)
+	bridge, children, climate, _ := buildBridgeAccessories(testStreams, &fakeDoors{}, gree, nil, "", 5*time.Second)
 
 	if bridge.Id != bridgeAID {
 		t.Errorf("bridge AID = %d, want %d", bridge.Id, bridgeAID)
@@ -82,7 +82,7 @@ func TestBridgeExposesOneLockPerDoorPlusClimate(t *testing.T) {
 }
 
 func TestBridgeWithoutAirConditioner(t *testing.T) {
-	_, children, climate := buildBridgeAccessories(testStreams, &fakeDoors{}, nil, 5*time.Second)
+	_, children, climate, _ := buildBridgeAccessories(testStreams, &fakeDoors{}, nil, nil, "", 5*time.Second)
 	if climate != nil {
 		t.Error("climate accessory built without a configured unit")
 	}
@@ -93,7 +93,7 @@ func TestBridgeWithoutAirConditioner(t *testing.T) {
 
 func TestClimateAccessoryCarriesThermostatAndBothModeSwitches(t *testing.T) {
 	gree := &fakeGree{name: "Living Room AC"}
-	_, children, _ := buildBridgeAccessories(testStreams, &fakeDoors{}, gree, 5*time.Second)
+	_, children, _, _ := buildBridgeAccessories(testStreams, &fakeDoors{}, gree, nil, "", 5*time.Second)
 
 	ac := children[2]
 	types := map[string]int{}

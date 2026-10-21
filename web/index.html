@@ -304,6 +304,41 @@
   #homekit .accessories li:last-child { border-bottom: none; }
   #homekit .accessories li .count { color: #888; }
   #homekit-toggle.unpaired { box-shadow: 0 0 0 1px #f0c060; }
+
+  /* Gate login — same centred-modal treatment as #homekit. */
+  #centsys {
+    position: fixed; inset: 0; z-index: 20;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+  }
+  #centsys.open { display: flex; }
+  #centsys .card {
+    width: 340px; background: #161618;
+    border: 1px solid #2a2a2e; border-radius: 8px;
+  }
+  #centsys h2 {
+    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #centsys h2 .close { margin-left: auto; }
+  #centsys .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
+  #centsys .section:last-child { border-bottom: none; }
+  #centsys .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; }
+  #centsys .pill.in  { background: #2d6a3e; color: #b8e0c0; }
+  #centsys .pill.out { background: #6a4a2d; color: #f0c060; }
+  #centsys input {
+    width: 100%; box-sizing: border-box; margin-top: 8px; padding: 8px;
+    font-size: 18px; letter-spacing: 3px; text-align: center;
+    background: #0e0e10; color: #d6d6d6; border: 1px solid #2a2a2e; border-radius: 4px;
+  }
+  #centsys button.act {
+    margin-top: 8px; width: 100%; padding: 8px; font-size: 13px; font-weight: 600;
+    background: #2a3550; color: #cfe0ff; border: 1px solid #3a4a70; border-radius: 4px; cursor: pointer;
+  }
+  #centsys button.act:disabled { opacity: .5; cursor: default; }
+  #centsys .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.6; }
+  #centsys-toggle.out { box-shadow: 0 0 0 1px #f0c060; }
 </style>
 </head>
 <body>
@@ -317,6 +352,7 @@
   </button>
   <button id="climate-toggle" title="Air conditioner" hidden>❄</button>
   <button id="homekit-toggle" title="HomeKit pairing" hidden>🏠</button>
+  <button id="centsys-toggle" title="Gate login" hidden>🚪</button>
 </header>
 <div class="grid" id="grid"></div>
 
@@ -423,6 +459,26 @@
       <div class="hint" id="hk-paired-hint" hidden>
         All paired. To remove or re-pair, delete the accessory in the Home app.
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="centsys" aria-hidden="true">
+  <div class="card">
+    <h2>
+      Gate login
+      <button class="close" id="cs-close">close</button>
+    </h2>
+    <div class="section">
+      <div id="cs-state">loading…</div>
+      <div class="hint" id="cs-phone"></div>
+    </div>
+    <div class="section" id="cs-login">
+      <button class="act" id="cs-send">Send code to my phone</button>
+      <input id="cs-code" inputmode="numeric" autocomplete="one-time-code"
+             placeholder="code" maxlength="10" hidden />
+      <button class="act" id="cs-submit" hidden>Sign in</button>
+      <div class="hint" id="cs-msg"></div>
     </div>
   </div>
 </div>
@@ -1225,6 +1281,96 @@ document.getElementById('hk-close').addEventListener('click', closeHomeKit);
 hkEl.addEventListener('click', (e) => { if (e.target === hkEl) closeHomeKit(); });
 
 refreshHomeKit();
+
+
+// ---- Gate login (Centsys) ----------------------------------------------
+
+const csEl = document.getElementById('centsys');
+const csToggle = document.getElementById('centsys-toggle');
+const csState = document.getElementById('cs-state');
+const csPhone = document.getElementById('cs-phone');
+const csSend = document.getElementById('cs-send');
+const csCode = document.getElementById('cs-code');
+const csSubmit = document.getElementById('cs-submit');
+const csMsg = document.getElementById('cs-msg');
+
+async function refreshCentsys() {
+  let st;
+  try {
+    st = await fetch('/centsys/status').then(r => r.json());
+  } catch (_) { return null; }
+
+  if (!st.configured) { csToggle.hidden = true; return st; }
+  csToggle.hidden = false;
+  csToggle.classList.toggle('out', !st.loggedIn);
+
+  csState.innerHTML = st.loggedIn
+    ? '<span class="pill in">signed in</span>' + (st.gateStatus ? ' · ' + st.gateStatus : '')
+    : '<span class="pill out">not signed in</span>';
+  csPhone.textContent = st.phone ? 'Account ' + st.phone : '';
+  return st;
+}
+
+csSend.addEventListener('click', async () => {
+  csSend.disabled = true;
+  csMsg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/centsys/send', { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    csMsg.textContent = 'Code sent. Check WhatsApp or SMS, then enter it below.';
+    csCode.hidden = false; csSubmit.hidden = false; csCode.focus();
+  } catch (e) {
+    csMsg.textContent = 'Could not send code: ' + e.message;
+  } finally {
+    csSend.disabled = false;
+  }
+});
+
+csSubmit.addEventListener('click', async () => {
+  const code = csCode.value.trim();
+  if (!code) { csCode.focus(); return; }
+  csSubmit.disabled = true;
+  csMsg.textContent = 'Signing in…';
+  try {
+    const r = await fetch('/centsys/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const res = await r.json();
+    csMsg.textContent = res.restartRequired
+      ? 'Signed in and saved. Restart camonitor to activate the gate in Home.'
+      : 'Signed in and saved.';
+    csCode.hidden = true; csSubmit.hidden = true;
+    refreshCentsys();
+  } catch (e) {
+    csMsg.textContent = 'Sign-in failed: ' + e.message;
+  } finally {
+    csSubmit.disabled = false;
+  }
+});
+
+csToggle.addEventListener('click', () => {
+  const opening = !csEl.classList.contains('open');
+  csEl.classList.toggle('open');
+  csEl.setAttribute('aria-hidden', !opening);
+  if (opening) refreshCentsys();
+});
+function closeCentsys() {
+  csEl.classList.remove('open');
+  csEl.setAttribute('aria-hidden', 'true');
+}
+document.getElementById('cs-close').addEventListener('click', closeCentsys);
+csEl.addEventListener('click', (e) => { if (e.target === csEl) closeCentsys(); });
+
+// Surface the login immediately if a gate is configured but not signed in.
+refreshCentsys().then((st) => {
+  if (st && st.configured && !st.loggedIn) {
+    csEl.classList.add('open');
+    csEl.setAttribute('aria-hidden', 'false');
+  }
+});
 
 
 // One initial WA status check so we can show the pairing alert immediately

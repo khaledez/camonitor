@@ -140,6 +140,7 @@ type Config struct {
 	SIP      SIPConfig       `json:"sip"`
 	WhatsApp *WhatsAppConfig `json:"whatsapp,omitempty"`
 	Gree     *GreeConfig     `json:"gree,omitempty"`
+	Centsys  *CentsysConfig  `json:"centsys,omitempty"`
 	HomeKit  *HomeKitConfig  `json:"homekit,omitempty"`
 	Streams  []StreamConfig  `json:"streams"`
 	// Timezone names the IANA zone used when rendering wall-clock times
@@ -273,11 +274,30 @@ func main() {
 	tsHostname := flag.String("tailscale", "",
 		"if set, register on the tailnet with this hostname and serve HTTPS / "+
 			"WebRTC media over the tailnet. Requires TS_AUTHKEY env on first run.")
+	centsysLoginFlag := flag.Bool("centsys-login", false,
+		"run the one-time Centsys gate login (sends an OTP, prompts for the code), "+
+			"save the session, and exit")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+
+	if *centsysLoginFlag {
+		if cfg.Centsys == nil {
+			log.Fatalf("centsys-login: no \"centsys\" block in %s", *configPath)
+		}
+		err := centsysLogin(context.Background(), *cfg.Centsys, func() (string, error) {
+			fmt.Print("Enter the OTP code you received: ")
+			var code string
+			_, err := fmt.Scanln(&code)
+			return code, err
+		})
+		if err != nil {
+			log.Fatalf("centsys-login: %v", err)
+		}
+		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -310,6 +330,15 @@ func main() {
 	var greeCtrl *GreeController
 	if cfg.Gree != nil {
 		greeCtrl = NewGreeController(*cfg.Gree)
+	}
+
+	// Centsys gate is optional. The controller is built whenever a gate is
+	// configured, even before the one-time login, so its HomeKit tile and
+	// the web login endpoints are present; it stays dormant until a session
+	// is loaded (at startup or via the web login) — never fatal.
+	var centsysCtrl *CentsysController
+	if cfg.Centsys != nil {
+		centsysCtrl = NewCentsysController(*cfg.Centsys)
 	}
 
 	// WhatsApp is optional; nil sender means "skip the WA leg". The
@@ -378,11 +407,15 @@ func main() {
 	events := NewEventAttachClient(doorStreams(cfg.Streams), bell)
 	go events.Run(ctx)
 
-	homekit := newHomeKit(cfg, doors, greeCtrl, bell, snapFetch)
+	homekit := newHomeKit(cfg, doors, greeCtrl, centsysCtrl, bell, snapFetch)
 
-	// Every observer is registered by now, so start polling the AC.
+	// Every observer is registered by now, so start polling the AC and
+	// following the gate's status.
 	if greeCtrl != nil {
 		go greeCtrl.Run(ctx)
+	}
+	if centsysCtrl != nil {
+		go centsysCtrl.Run(ctx)
 	}
 
 	staticFS, err := fs.Sub(webFS, "web")
@@ -408,6 +441,21 @@ func main() {
 		mux.HandleFunc("/gree/set", greeCtrl.HandleSet)
 	} else {
 		mux.HandleFunc("/gree/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(`{"configured":false}`))
+		})
+	}
+
+	// Centsys gate login + status. The endpoints exist whenever a gate is
+	// configured, even before the one-time login, so the browser can do it.
+	if cfg.Centsys != nil {
+		cw := &CentsysWeb{cfg: *cfg.Centsys, ctrl: centsysCtrl}
+		mux.HandleFunc("/centsys/status", cw.HandleStatus)
+		mux.HandleFunc("/centsys/send", cw.HandleSend)
+		mux.HandleFunc("/centsys/login", cw.HandleLogin)
+	} else {
+		mux.HandleFunc("/centsys/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write([]byte(`{"configured":false}`))

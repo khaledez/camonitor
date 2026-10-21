@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/brutella/hap v0.0.35
+	github.com/eclipse/paho.golang v0.23.0
 	github.com/emiago/sipgo v1.3.1
 	github.com/mdp/qrterminal/v3 v3.2.1
 	// WebRTC requires SCTP/DTLS/SRTP/ICE stacks that aren't in the standard
@@ -15,6 +16,7 @@ require (
 	go.mau.fi/whatsmeow v0.0.0-20260506122147-6a7198d94d26
 	modernc.org/sqlite v1.50.0
 	rsc.io/qr v0.2.0
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 	tailscale.com v1.98.0
 )
 

@@ -287,6 +287,46 @@ Backend endpoints: `GET /gree/status` returns the current state;
 "temp":24,"fan":3}`). The server scans, binds, and caches the unit's
 per-device AES key automatically.
 
+## Centsys gate (Centurion SMART Wi-Fi)
+
+An optional `centsys` block brings a Centurion SMART Wi-Fi gate operator
+into HomeKit as a garage-door tile (open/close from the Home app and Siri),
+with the tile tracking the gate's real open/closed state. The motor is
+reached through Centurion's cloud (the same path the MyCentsys app uses),
+so this needs internet; it is not a local-only control.
+
+```json
+"centsys": {
+  "phone": "+27831234567",
+  "name": "Gate",
+  "session": "/var/lib/camonitor/centsys.json"
+}
+```
+
+| field     | required | meaning |
+| --------- | -------- | ------- |
+| `phone`   | yes      | The account number registered in the MyCentsys app, with country code. |
+| `name`    |          | HomeKit tile name. Defaults to `Gate`. |
+| `session` |          | Where the one-time login is saved. Defaults to `/var/lib/camonitor/centsys.json`. |
+
+**One-time login.** Run once to authenticate and save the session (a client
+certificate plus the gate's serial and MAC — no account password is stored,
+and the running server never needs a login token afterwards):
+
+```sh
+camonitor -config /etc/camonitor/config.json -centsys-login
+```
+
+It sends a one-time code to your phone (WhatsApp or SMS) and prompts you to
+paste it, then writes the `session` file and exits. Keep the `session` file
+on a persistent volume (the same one as the WhatsApp session is fine). If
+the client certificate ever expires, just run the login again.
+
+Notes and limits: South-Africa region only; a sliding/swing gate is driven
+with its single `TRG` trigger, so Home's "open" and "close" both send that
+one toggle. This is an unofficial, reverse-engineered integration — a
+Centurion app-side change could break it.
+
 ## HomeKit
 
 Add an optional `homekit` block to expose the door stations and the air

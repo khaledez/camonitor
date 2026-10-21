@@ -28,6 +28,7 @@ const (
 	bridgeAID    = 1
 	firstLockAID = 2
 	climateAID   = 100
+	gateAID      = 200
 )
 
 // buildBridgeAccessories returns the bridge, the accessories hanging off
@@ -37,8 +38,10 @@ func buildBridgeAccessories(
 	streams []StreamConfig,
 	doors doorOpener,
 	gree greeDevice,
+	gate gateController,
+	gateName string,
 	relock time.Duration,
-) (*accessory.A, []*accessory.A, *hkClimate) {
+) (*accessory.A, []*accessory.A, *hkClimate, *hkGate) {
 	bridge := accessory.NewBridge(accessory.Info{
 		Name:         bridgeName,
 		Manufacturer: bridgeManufacturer,
@@ -58,13 +61,37 @@ func buildBridgeAccessories(
 		aid++
 	}
 
-	if gree == nil {
-		return bridge.A, children, nil
+	var climate *hkClimate
+	if gree != nil {
+		climate = newHKClimate(gree)
+		children = append(children, newClimateAccessory(gree.Name(), climate))
 	}
 
-	climate := newHKClimate(gree)
-	children = append(children, newClimateAccessory(gree.Name(), climate))
-	return bridge.A, children, climate
+	var gateAcc *hkGate
+	if gate != nil {
+		gateAcc = newHKGate(gateName, gate)
+		children = append(children, newGateAccessory(gateName, gateAcc))
+	}
+
+	return bridge.A, children, climate, gateAcc
+}
+
+func newGateAccessory(name string, gate *hkGate) *accessory.A {
+	if name == "" {
+		name = "Gate"
+	}
+	a := accessory.New(accessory.Info{
+		Name:         name,
+		Manufacturer: bridgeManufacturer,
+		Model:        "Centsys SMART",
+		SerialNumber: "centsys-gate",
+		Firmware:     accessoryFirmware,
+	}, accessory.TypeGarageDoorOpener)
+	a.Id = gateAID
+
+	gate.svc.Primary = true
+	a.AddS(gate.svc.S)
+	return a
 }
 
 func newLockAccessory(s StreamConfig, doors doorOpener, relock time.Duration, aid uint64) *accessory.A {
