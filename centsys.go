@@ -223,10 +223,46 @@ func (c *CentsysController) setStatus(s gateStatus) {
 
 func (c *CentsysController) tlsConfig(cr *centsysCreds) *tls.Config {
 	return &tls.Config{
-		RootCAs:      c.caPool,
-		ServerName:   centsysTLSServerName,
+		ServerName:   centsysTLSServerName, // SNI only
 		Certificates: []tls.Certificate{cr.cert},
+		// The broker's leaf carries a legacy Common Name and no SAN, which
+		// Go's default verifier rejects outright. Verify the chain against
+		// the pinned Centsys CA ourselves and drop only the hostname match —
+		// so the broker still has to present a cert that CA signed.
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: c.verifyBrokerCert,
 	}
+}
+
+// verifyBrokerCert checks the broker's certificate chains to the pinned
+// Centsys CA, without requiring a SAN/hostname match.
+func (c *CentsysController) verifyBrokerCert(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return errors.New("centsys: broker sent no certificate")
+	}
+	certs := make([]*x509.Certificate, len(rawCerts))
+	for i, raw := range rawCerts {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			return fmt.Errorf("centsys: parse broker cert: %w", err)
+		}
+		certs[i] = cert
+	}
+	inter := x509.NewCertPool()
+	for _, cert := range certs[1:] {
+		inter.AddCert(cert)
+	}
+	_, err := certs[0].Verify(x509.VerifyOptions{
+		Roots:         c.caPool,
+		Intermediates: inter,
+		// No DNSName: the issuer CA is pinned instead of a hostname. Any EKU
+		// is fine — the broker's leaf need not be marked for server auth.
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	})
+	if err != nil {
+		return fmt.Errorf("centsys: broker cert not trusted: %w", err)
+	}
+	return nil
 }
 
 func centsysClientID(phone, suffix string) string {
