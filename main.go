@@ -200,6 +200,9 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
+	if cfg.Guest != nil && cfg.Guest.PublicBase == "" {
+		return nil, fmt.Errorf("%s: guest.public_base is required (e.g. https://monitor.<tailnet>.ts.net:8443)", path)
+	}
 	if cfg.Guest != nil && cfg.Guest.StorePath == "" {
 		cfg.Guest.StorePath = "/var/lib/camonitor/guests.json"
 	}
