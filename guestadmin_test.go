@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -83,5 +85,38 @@ func TestDeleteRevokes(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("DELETE", "/admin/guests/nope", nil))
 	if rec.Code != 404 {
 		t.Fatalf("unknown id status = %d", rec.Code)
+	}
+}
+
+func TestQRDataURIIsPNG(t *testing.T) {
+	uri, err := qrDataURI("https://example.com?code=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "data:image/png;base64,"
+	if !strings.HasPrefix(uri, prefix) {
+		t.Fatalf("bad prefix: %.30s", uri)
+	}
+	png, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(uri, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(png, []byte("\x89PNG")) {
+		t.Fatal("payload is not a PNG")
+	}
+}
+
+func TestCreateIncludesQR(t *testing.T) {
+	h, _ := newTestAdmin(t)
+	out := createGuest(t, h, "Housekeeper")
+	if !strings.HasPrefix(out["qr"], "data:image/png;base64,") {
+		t.Fatalf("qr = %.30q", out["qr"])
+	}
+}
+
+func TestInviteURLFormat(t *testing.T) {
+	got := inviteURL("https://h:8443/guest/enroll", "ABC")
+	if got != "https://h:8443/guest/enroll?code=ABC" {
+		t.Fatalf("inviteURL = %q", got)
 	}
 }

@@ -13,6 +13,7 @@ require (
 	github.com/pion/rtp v1.10.5
 	github.com/pion/srtp/v3 v3.0.13
 	github.com/pion/webrtc/v4 v4.2.12
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.mau.fi/whatsmeow v0.0.0-20260506122147-6a7198d94d26
 	modernc.org/sqlite v1.50.0
 	rsc.io/qr v0.2.0

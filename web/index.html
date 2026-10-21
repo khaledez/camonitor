@@ -339,6 +339,47 @@
   #centsys button.act:disabled { opacity: .5; cursor: default; }
   #centsys .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.6; }
   #centsys-toggle.out { box-shadow: 0 0 0 1px #f0c060; }
+  /* Guests admin — tailnet-only; toggle stays hidden if /admin/guests isn't served. */
+  #guests {
+    position: fixed; inset: 0; z-index: 20;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+  }
+  #guests.open { display: flex; }
+  #guests .card {
+    width: 360px; max-height: 90vh; overflow-y: auto; background: #161618;
+    border: 1px solid #2a2a2e; border-radius: 8px;
+  }
+  #guests h2 {
+    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #guests h2 .close { margin-left: auto; }
+  #guests .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
+  #guests .section:last-child { border-bottom: none; }
+  #guests ul { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+  #guests li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #2a2a2e; color: #d6d6d6; }
+  #guests li:last-child { border-bottom: none; }
+  #guests li .name { flex: 1; }
+  #guests li .when { color: #888; }
+  #guests .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; }
+  #guests .pill.Enrolled { background: #2d6a3e; color: #b8e0c0; }
+  #guests .pill.Pending  { background: #6a4a2d; color: #f0c060; }
+  #guests .pill.Revoked  { background: #3a3a3e; color: #aaa; }
+  #guests input {
+    width: 100%; box-sizing: border-box; padding: 8px; font-size: 13px;
+    background: #0e0e10; color: #d6d6d6; border: 1px solid #2a2a2e; border-radius: 4px;
+  }
+  #guests button.act {
+    margin-top: 8px; width: 100%; padding: 8px; font-size: 13px; font-weight: 600;
+    background: #2a3550; color: #cfe0ff; border: 1px solid #3a4a70; border-radius: 4px; cursor: pointer;
+  }
+  #guests button.act:disabled { opacity: .5; cursor: default; }
+  #guests .invite { text-align: center; }
+  #guests .invite img { width: 200px; height: 200px; background: #fff; border-radius: 4px; }
+  #guests .invite .link { word-break: break-all; font-size: 11px; color: #9ab; margin-top: 6px; }
+  #guests .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -353,6 +394,7 @@
   <button id="climate-toggle" title="Air conditioner" hidden>❄</button>
   <button id="homekit-toggle" title="HomeKit pairing" hidden>🏠</button>
   <button id="centsys-toggle" title="Gate login" hidden>🚪</button>
+  <button id="guests-toggle" title="Guests" hidden>👥</button>
 </header>
 <div class="grid" id="grid"></div>
 
@@ -479,6 +521,27 @@
              placeholder="code" maxlength="10" hidden />
       <button class="act" id="cs-submit" hidden>Sign in</button>
       <div class="hint" id="cs-msg"></div>
+    </div>
+  </div>
+</div>
+
+<div id="guests" aria-hidden="true">
+  <div class="card">
+    <h2>
+      Guests
+      <button class="close" id="gu-close">close</button>
+    </h2>
+    <div class="section"><ul id="gu-list"></ul></div>
+    <div class="section">
+      <input id="gu-label" placeholder="Guest label (e.g. Housekeeper)" maxlength="60" />
+      <button class="act" id="gu-add">Add guest</button>
+      <div class="hint" id="gu-msg"></div>
+    </div>
+    <div class="section invite" id="gu-invite" hidden>
+      <img id="gu-qr" alt="Guest invite QR code" />
+      <div class="link" id="gu-link"></div>
+      <button class="act" id="gu-copy">Copy link</button>
+      <div class="hint">Scan in the Home Access app. Single-use, expires ~10 minutes.</div>
     </div>
   </div>
 </div>
@@ -1372,6 +1435,116 @@ refreshCentsys().then((st) => {
   }
 });
 
+
+// ---- Guests admin (tailnet only) ---------------------------------------
+
+const guEl = document.getElementById('guests');
+const guToggle = document.getElementById('guests-toggle');
+const guList = document.getElementById('gu-list');
+const guLabel = document.getElementById('gu-label');
+const guAdd = document.getElementById('gu-add');
+const guMsg = document.getElementById('gu-msg');
+const guInvite = document.getElementById('gu-invite');
+const guQR = document.getElementById('gu-qr');
+const guLink = document.getElementById('gu-link');
+
+// The admin routes are not mounted on the LAN :8080 mux; any failure means
+// "not on the tailnet", so the toggle stays hidden.
+async function refreshGuests() {
+  let guests;
+  try {
+    const r = await fetch('/admin/guests');
+    if (!r.ok) { guToggle.hidden = true; return; }
+    guests = await r.json();
+  } catch (_) { guToggle.hidden = true; return; }
+  guToggle.hidden = false;
+
+  guList.innerHTML = '';
+  for (const g of guests.filter(g => !g.revoked)) {
+    const status = g.enrolled ? 'Enrolled' : 'Pending';
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = g.label;
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = new Date(g.created).toLocaleDateString();
+    const pill = document.createElement('span');
+    pill.className = 'pill ' + status;
+    pill.textContent = status;
+    const revoke = document.createElement('button');
+    revoke.textContent = 'Revoke';
+    revoke.addEventListener('click', async () => {
+      revoke.disabled = true;
+      try {
+        const r = await fetch('/admin/guests/' + encodeURIComponent(g.id), { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (e) {
+        guMsg.textContent = 'Could not revoke: ' + e.message;
+        revoke.disabled = false;
+        return;
+      }
+      refreshGuests();
+    });
+    li.append(name, when, pill, revoke);
+    guList.append(li);
+  }
+  if (!guList.children.length) guList.textContent = 'No guests yet.';
+}
+
+guAdd.addEventListener('click', async () => {
+  const label = guLabel.value.trim();
+  if (!label) { guLabel.focus(); return; }
+  guAdd.disabled = true;
+  guMsg.textContent = 'Adding…';
+  try {
+    const r = await fetch('/admin/guests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const g = await r.json();
+    guQR.src = g.qr;
+    guLink.textContent = g.enrollURL + '?code=' + g.enrollCode;
+    guInvite.hidden = false;
+    guLabel.value = '';
+    guMsg.textContent = '';
+    refreshGuests();
+  } catch (e) {
+    guMsg.textContent = 'Could not add guest: ' + e.message;
+  } finally {
+    guAdd.disabled = false;
+  }
+});
+
+document.getElementById('gu-copy').addEventListener('click', async (e) => {
+  try {
+    await navigator.clipboard.writeText(guLink.textContent);
+    e.target.textContent = 'Copied';
+  } catch (_) {
+    e.target.textContent = 'Copy failed — select the link manually';
+  }
+});
+
+guToggle.addEventListener('click', () => {
+  const opening = !guEl.classList.contains('open');
+  guEl.classList.toggle('open');
+  guEl.setAttribute('aria-hidden', !opening);
+  if (opening) refreshGuests();
+});
+function closeGuests() {
+  guEl.classList.remove('open');
+  guEl.setAttribute('aria-hidden', 'true');
+  // The code is single-use; don't leave it in the DOM.
+  guInvite.hidden = true;
+  guQR.src = '';
+  guLink.textContent = '';
+  document.getElementById('gu-copy').textContent = 'Copy link';
+}
+document.getElementById('gu-close').addEventListener('click', closeGuests);
+guEl.addEventListener('click', (e) => { if (e.target === guEl) closeGuests(); });
+refreshGuests();
 
 // One initial WA status check so we can show the pairing alert immediately
 // if the server is unpaired — saves the user from having to open the panel

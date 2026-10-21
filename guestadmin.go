@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 // GuestAdmin is the owner-only guest management API; serve it on the tailnet, never the public funnel.
@@ -38,11 +42,19 @@ func (a *GuestAdmin) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	enrollURL := a.funnelBase + "/guest/enroll"
+	// Invite format is the contract the mobile app parses.
+	qr, err := qrDataURI(inviteURL(enrollURL, enrollCode))
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]string{
 		"id":         guest.ID,
 		"label":      guest.Label,
 		"enrollCode": enrollCode,
-		"enrollURL":  a.funnelBase + "/guest/enroll",
+		"enrollURL":  enrollURL,
+		"qr":         qr,
 	})
 }
 
@@ -73,4 +85,16 @@ func (a *GuestAdmin) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func qrDataURI(content string) (string, error) {
+	png, err := qrcode.Encode(content, qrcode.Medium, 256)
+	if err != nil {
+		return "", err
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+
+func inviteURL(enrollURL, code string) string {
+	return enrollURL + "?code=" + url.QueryEscape(code)
 }
