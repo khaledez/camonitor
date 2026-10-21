@@ -15,6 +15,8 @@ func parseInviteQR(_ raw: String) -> Invite? {
     guard isHTTPS, hasHost, isEnrollPath, !code.isEmpty else { return nil }
 
     // The API base is whatever host the QR came from, so it is never hardcoded.
+    parts.user = nil
+    parts.password = nil
     parts.path = ""
     parts.query = nil
     parts.fragment = nil

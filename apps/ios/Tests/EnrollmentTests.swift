@@ -6,6 +6,10 @@ final class EnrollmentTests: XCTestCase {
         let i = parseInviteQR("https://monitor.deer-ladon.ts.net:8443/guest/enroll?code=XYZ")
         XCTAssertEqual(i, Invite(apiBase: URL(string: "https://monitor.deer-ladon.ts.net:8443")!, code: "XYZ"))
     }
+    func testStripsUserinfoFromApiBase() {
+        let i = parseInviteQR("https://user:pass@h.ts.net:8443/guest/enroll?code=X")
+        XCTAssertEqual(i?.apiBase, URL(string: "https://h.ts.net:8443")!)
+    }
     func testRejectsWrongPath()   { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/gate/open?code=X")) }
     func testRejectsMissingCode() { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/enroll")) }
     func testRejectsEmptyCode()   { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/enroll?code=")) }
