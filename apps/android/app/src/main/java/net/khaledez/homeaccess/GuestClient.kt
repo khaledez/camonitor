@@ -13,8 +13,14 @@ class GuestException(val error: GuestError) : Exception(error.name)
 
 private val TOKEN_FIELD = Regex(""""token"\s*:\s*"([^"]+)"""")
 
-class GuestClient(val apiBase: String) {
-    suspend fun enroll(code: String): String {
+interface GuestApi {
+    suspend fun enroll(code: String): String
+    suspend fun openGate(token: String)
+    suspend fun openOutdoor(token: String)
+}
+
+class GuestClient(val apiBase: String) : GuestApi {
+    override suspend fun enroll(code: String): String {
         // org.json is a stub in JVM unit tests and we avoid a JSON dependency for two fields.
         val escapedCode = code.replace("\\", "\\\\").replace("\"", "\\\"")
         val response = post("/guest/enroll", body = """{"code":"$escapedCode"}""", token = null)
@@ -22,11 +28,11 @@ class GuestClient(val apiBase: String) {
         return token ?: throw GuestException(GuestError.Server)
     }
 
-    suspend fun openGate(token: String) {
+    override suspend fun openGate(token: String) {
         post("/guest/gate/open", body = null, token = token)
     }
 
-    suspend fun openOutdoor(token: String) {
+    override suspend fun openOutdoor(token: String) {
         post("/guest/outdoor/open", body = null, token = token)
     }
 
