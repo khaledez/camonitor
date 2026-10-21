@@ -2,12 +2,15 @@ package net.khaledez.homeaccess
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -44,8 +47,9 @@ class GuestViewModelTest {
     private val validQr = "https://home.example.com/guest/enroll?code=abc"
     private val store = FakeSessionStore()
     private val api = FakeApi()
+    private val dispatcher = StandardTestDispatcher()
 
-    @Before fun setUp() = Dispatchers.setMain(UnconfinedTestDispatcher())
+    @Before fun setUp() = Dispatchers.setMain(dispatcher)
 
     @After fun tearDown() = Dispatchers.resetMain()
 
@@ -64,64 +68,95 @@ class GuestViewModelTest {
         assertEquals(Phase.Enrolled, enrolledVm().phase.value)
     }
 
-    @Test fun validInviteEnrolls() = runTest {
+    @Test fun validInviteEnrolls() = runTest(dispatcher) {
         val vm = newVm()
         vm.handleScanned(validQr)
+        advanceUntilIdle()
         assertEquals(Phase.Enrolled, vm.phase.value)
         assertEquals(Session("https://home.example.com", "tok"), store.load())
     }
 
-    @Test fun badCodeIsNotResubmitted() = runTest {
+    @Test fun badCodeIsNotResubmitted() = runTest(dispatcher) {
         api.enrollError = GuestError.BadCode
         val vm = newVm()
         vm.handleScanned(validQr)
+        advanceUntilIdle()
         vm.handleScanned(validQr)
+        advanceUntilIdle()
         assertEquals(Phase.NeedsEnrollment, vm.phase.value)
         assertNotNull(vm.enrollError.value)
         assertEquals(1, api.enrollCalls)
     }
 
-    @Test fun codeIsRetriedAfterNetworkFailure() = runTest {
+    @Test fun codeIsRetriedAfterNetworkFailure() = runTest(dispatcher) {
         api.enrollError = GuestError.Network
         val vm = newVm()
         vm.handleScanned(validQr)
+        advanceUntilIdle()
         vm.handleScanned(validQr)
+        advanceUntilIdle()
         assertEquals(2, api.enrollCalls)
         assertEquals(Phase.NeedsEnrollment, vm.phase.value)
         assertNotNull(vm.enrollError.value)
     }
 
-    @Test fun foreignQrDoesNotEnroll() = runTest {
+    @Test fun foreignQrDoesNotEnroll() = runTest(dispatcher) {
         val vm = newVm()
         vm.handleScanned("https://example.com/other")
+        advanceUntilIdle()
         assertEquals(0, api.enrollCalls)
         assertEquals(Phase.NeedsEnrollment, vm.phase.value)
         assertNotNull(vm.enrollError.value)
     }
 
-    @Test fun unauthorizedGateClearsSession() = runTest {
+    @Test fun unauthorizedGateClearsSession() = runTest(dispatcher) {
         api.actionError = GuestError.Unauthorized
         val vm = enrolledVm()
         vm.openGate()
+        advanceUntilIdle()
         assertEquals(Phase.NeedsEnrollment, vm.phase.value)
         assertNull(store.load())
     }
 
-    @Test fun deviceUnavailableShowsStatusAndStaysEnrolled() = runTest {
+    @Test fun deviceUnavailableShowsStatusAndStaysEnrolled() = runTest(dispatcher) {
         api.actionError = GuestError.DeviceUnavailable
         val vm = enrolledVm()
         vm.openGate()
+        advanceUntilIdle()
         assertEquals(Phase.Enrolled, vm.phase.value)
         assertNotNull(vm.actionStatus.value)
+        assertNotEquals("Opened", vm.actionStatus.value)
     }
 
-    @Test fun actionsPassStoredToken() = runTest {
+    @Test fun successShowsStatusThenClears() = runTest(dispatcher) {
         val vm = enrolledVm()
         vm.openGate()
+        runCurrent()
+        assertEquals("Opened", vm.actionStatus.value)
+        assertEquals(false, vm.isBusy.value)
+        advanceUntilIdle()
+        assertNull(vm.actionStatus.value)
+    }
+
+    @Test fun badCodeRearmsScannerAfterDelay() = runTest(dispatcher) {
+        api.enrollError = GuestError.BadCode
+        val vm = newVm()
+        vm.handleScanned(validQr)
+        runCurrent()
+        assertEquals(0, vm.scanAttempt.value)
+        advanceUntilIdle()
+        assertEquals(1, vm.scanAttempt.value)
+    }
+
+    @Test fun actionsPassStoredToken() = runTest(dispatcher) {
+        val vm = enrolledVm()
+        vm.openGate()
+        advanceUntilIdle()
         assertEquals("gate", api.lastAction)
         assertEquals("stored-token", api.lastToken)
         api.lastToken = null
         vm.openOutdoor()
+        advanceUntilIdle()
         assertEquals("outdoor", api.lastAction)
         assertEquals("stored-token", api.lastToken)
     }

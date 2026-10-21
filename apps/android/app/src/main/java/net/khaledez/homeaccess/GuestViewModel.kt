@@ -18,7 +18,11 @@ class GuestViewModel(
     private val _actionStatus = MutableStateFlow<String?>(null)
     private val _isBusy = MutableStateFlow(false)
 
+    private val _scanAttempt = MutableStateFlow(0)
+
     val phase: StateFlow<Phase> = _phase
+    // The screen keys QrScanner on this; it fires once per instance, so a bump re-arms it.
+    val scanAttempt: StateFlow<Int> = _scanAttempt
     val enrollError: StateFlow<String?> = _enrollError
     val actionStatus: StateFlow<String?> = _actionStatus
     val isBusy: StateFlow<Boolean> = _isBusy
@@ -27,7 +31,20 @@ class GuestViewModel(
     // resubmitting a dead code is pointless, but a network failure must stay retryable.
     private var lastRejectedCode: String? = null
 
-    suspend fun handleScanned(raw: String) {
+    // Runs on viewModelScope so a rotation mid-enroll can't cancel it between the server
+    // consuming the one-time code and store.save.
+    fun handleScanned(raw: String) {
+        viewModelScope.launch {
+            enroll(raw)
+            if (_phase.value == Phase.NeedsEnrollment) {
+                // Debounce so a foreign/dead QR in view doesn't rebind the camera in a tight loop.
+                delay(1_000)
+                _scanAttempt.value++
+            }
+        }
+    }
+
+    private suspend fun enroll(raw: String) {
         val invite = parseInviteQR(raw)
         if (invite == null) {
             _enrollError.value = "That's not a valid invite"
@@ -42,11 +59,13 @@ class GuestViewModel(
             _enrollError.value = null
             _phase.value = Phase.Enrolled
         } catch (e: GuestException) {
-            if (e.error == GuestError.BadCode) {
-                lastRejectedCode = invite.code
-                _enrollError.value = "Invite expired or already used"
-            } else {
-                _enrollError.value = "Check your connection and try again"
+            when (e.error) {
+                GuestError.BadCode -> {
+                    lastRejectedCode = invite.code
+                    _enrollError.value = "Invite expired or already used."
+                }
+                GuestError.Network -> _enrollError.value = "Check your connection and try again."
+                else -> _enrollError.value = "Something went wrong. Please try again."
             }
         }
     }
@@ -56,19 +75,18 @@ class GuestViewModel(
     fun openOutdoor() = runAction { client, token -> client.openOutdoor(token) }
 
     private fun runAction(call: suspend (GuestApi, String) -> Unit) {
+        if (_isBusy.value) return
         val session = store.load() ?: run {
             _phase.value = Phase.NeedsEnrollment
             return
         }
+        _isBusy.value = true
+        _actionStatus.value = null
         viewModelScope.launch {
-            _isBusy.value = true
-            _actionStatus.value = null
             try {
                 call(makeClient(session.apiBase), session.token)
-                _actionStatus.value = "Opened"
-                delay(2_000)
-                _actionStatus.value = null
             } catch (e: GuestException) {
+                _isBusy.value = false
                 when (e.error) {
                     GuestError.Unauthorized -> {
                         store.clear()
@@ -77,9 +95,12 @@ class GuestViewModel(
                     GuestError.DeviceUnavailable -> _actionStatus.value = "Device unavailable, try again"
                     else -> _actionStatus.value = "Couldn't open. Check your connection and try again"
                 }
-            } finally {
-                _isBusy.value = false
+                return@launch
             }
+            _isBusy.value = false
+            _actionStatus.value = "Opened"
+            delay(2_000)
+            _actionStatus.value = null
         }
     }
 }
