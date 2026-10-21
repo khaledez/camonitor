@@ -553,7 +553,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	serverErr := make(chan error, 2)
+	serverErr := make(chan error, 3)
 	var wg sync.WaitGroup
 
 	// Joined rather than fired and forgotten: shutdown has to outlive
