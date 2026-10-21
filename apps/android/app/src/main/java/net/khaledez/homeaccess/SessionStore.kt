@@ -1,6 +1,7 @@
 package net.khaledez.homeaccess
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -13,26 +14,37 @@ interface SessionStore {
 }
 
 // The token lives only in Keystore-backed encrypted prefs; never log it.
-class KeystoreSessionStore(context: Context) : SessionStore {
-    private val prefs = EncryptedSharedPreferences.create(
+class KeystoreSessionStore(private val context: Context) : SessionStore {
+    private val prefsName = "session"
+
+    private fun openPrefs() = EncryptedSharedPreferences.create(
         context,
-        "session",
+        prefsName,
         MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    override fun save(s: Session) {
-        prefs.edit().putString("apiBase", s.apiBase).putString("token", s.token).apply()
+    // An invalidated Keystore key (lock-screen reset, restore) makes the old prefs
+    // undecryptable; wipe them so the guest just has to sign in again.
+    private fun <T> withPrefs(fallback: T, block: (SharedPreferences) -> T): T {
+        return try {
+            block(openPrefs())
+        } catch (e: Exception) {
+            context.deleteSharedPreferences(prefsName)
+            fallback
+        }
     }
 
-    override fun load(): Session? {
-        val apiBase = prefs.getString("apiBase", null) ?: return null
-        val token = prefs.getString("token", null) ?: return null
-        return Session(apiBase, token)
+    override fun save(s: Session) = withPrefs(Unit) {
+        it.edit().putString("apiBase", s.apiBase).putString("token", s.token).apply()
     }
 
-    override fun clear() {
-        prefs.edit().clear().apply()
+    override fun load(): Session? = withPrefs(null) {
+        val apiBase = it.getString("apiBase", null) ?: return@withPrefs null
+        val token = it.getString("token", null) ?: return@withPrefs null
+        Session(apiBase, token)
     }
+
+    override fun clear() = withPrefs(Unit) { it.edit().clear().apply() }
 }
