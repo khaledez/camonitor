@@ -142,6 +142,7 @@ type Config struct {
 	Gree     *GreeConfig     `json:"gree,omitempty"`
 	Centsys  *CentsysConfig  `json:"centsys,omitempty"`
 	HomeKit  *HomeKitConfig  `json:"homekit,omitempty"`
+	Guest    *GuestConfig    `json:"guest,omitempty"`
 	Streams  []StreamConfig  `json:"streams"`
 	// Timezone names the IANA zone used when rendering wall-clock times
 	// for outbound notifications (e.g. the WhatsApp caption). The browser
@@ -153,6 +154,33 @@ type Config struct {
 	// the existing in-memory-only behaviour. Recommended location is
 	// the same PVC that holds the WhatsApp session.
 	BellHistoryDB string `json:"bell_history_db,omitempty"`
+}
+
+// GuestConfig enables guest access (Funnel-exposed door buttons plus a
+// tailnet-only admin API). Requires the -tailscale flag.
+type GuestConfig struct {
+	// StorePath defaults to /var/lib/camonitor/guests.json.
+	StorePath string `json:"store_path,omitempty"`
+	// PublicBase is the guest Funnel URL handed out in enroll links,
+	// e.g. https://monitor.<tailnet>.ts.net:8443.
+	PublicBase string `json:"public_base,omitempty"`
+}
+
+// guestDoorActions binds the guest API's two buttons to the real openers.
+type guestDoorActions struct {
+	centsys *CentsysController
+	doors   *DoorClient
+}
+
+func (g guestDoorActions) OpenGate(ctx context.Context) error {
+	if g.centsys == nil {
+		return errors.New("centsys not configured")
+	}
+	return g.centsys.Open(ctx)
+}
+
+func (g guestDoorActions) OpenOutdoor(ctx context.Context) error {
+	return g.doors.Open(ctx, "vto2")
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -171,6 +199,9 @@ func loadConfig(path string) (*Config, error) {
 
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
+	}
+	if cfg.Guest != nil && cfg.Guest.StorePath == "" {
+		cfg.Guest.StorePath = "/var/lib/camonitor/guests.json"
 	}
 	if len(cfg.Streams) == 0 {
 		return nil, fmt.Errorf("%s: no streams configured", path)
@@ -423,24 +454,24 @@ func main() {
 		log.Fatalf("embed: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
-	mux.HandleFunc("/webrtc/offer", hub.HandleOffer)
-	mux.HandleFunc("/webrtc/answer", hub.HandleAnswer)
-	mux.HandleFunc("/stream/quality", hub.HandleSetQuality)
-	mux.HandleFunc("/door/open", doors.HandleOpen)
-	mux.HandleFunc("/events", bell.HandleEvents)
-	mux.HandleFunc("/snapshot", bell.HandleSnapshot)
-	mux.HandleFunc("/rings", bell.HandleHistory)
+	base := http.NewServeMux()
+	base.Handle("/", http.FileServer(http.FS(staticFS)))
+	base.HandleFunc("/webrtc/offer", hub.HandleOffer)
+	base.HandleFunc("/webrtc/answer", hub.HandleAnswer)
+	base.HandleFunc("/stream/quality", hub.HandleSetQuality)
+	base.HandleFunc("/door/open", doors.HandleOpen)
+	base.HandleFunc("/events", bell.HandleEvents)
+	base.HandleFunc("/snapshot", bell.HandleSnapshot)
+	base.HandleFunc("/rings", bell.HandleHistory)
 
 	// Gree climate control is optional; nil config means "skip". When
 	// absent we still mount a static "not configured" status endpoint so
 	// the web UI can hide the climate panel without a 404.
 	if greeCtrl != nil {
-		mux.HandleFunc("/gree/status", greeCtrl.HandleStatus)
-		mux.HandleFunc("/gree/set", greeCtrl.HandleSet)
+		base.HandleFunc("/gree/status", greeCtrl.HandleStatus)
+		base.HandleFunc("/gree/set", greeCtrl.HandleSet)
 	} else {
-		mux.HandleFunc("/gree/status", func(w http.ResponseWriter, r *http.Request) {
+		base.HandleFunc("/gree/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write([]byte(`{"configured":false}`))
@@ -451,31 +482,31 @@ func main() {
 	// configured, even before the one-time login, so the browser can do it.
 	if cfg.Centsys != nil {
 		cw := &CentsysWeb{cfg: *cfg.Centsys, ctrl: centsysCtrl}
-		mux.HandleFunc("/centsys/status", cw.HandleStatus)
-		mux.HandleFunc("/centsys/send", cw.HandleSend)
-		mux.HandleFunc("/centsys/login", cw.HandleLogin)
+		base.HandleFunc("/centsys/status", cw.HandleStatus)
+		base.HandleFunc("/centsys/send", cw.HandleSend)
+		base.HandleFunc("/centsys/login", cw.HandleLogin)
 	} else {
-		mux.HandleFunc("/centsys/status", func(w http.ResponseWriter, r *http.Request) {
+		base.HandleFunc("/centsys/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write([]byte(`{"configured":false}`))
 		})
 	}
 	if homekit != nil {
-		mux.HandleFunc("/homekit/status", homekit.HandleStatus)
-		mux.HandleFunc("/homekit/qr.png", homekit.HandleQR)
+		base.HandleFunc("/homekit/status", homekit.HandleStatus)
+		base.HandleFunc("/homekit/qr.png", homekit.HandleQR)
 	} else {
-		mux.HandleFunc("/homekit/status", handleHomeKitDisabled)
+		base.HandleFunc("/homekit/status", handleHomeKitDisabled)
 	}
 
 	if waClient != nil {
-		mux.HandleFunc("/wa/status", waClient.HandleStatus)
-		mux.HandleFunc("/wa/qr.png", waClient.HandleQR)
-		mux.HandleFunc("/wa/unpair", waClient.HandleUnpair)
+		base.HandleFunc("/wa/status", waClient.HandleStatus)
+		base.HandleFunc("/wa/qr.png", waClient.HandleQR)
+		base.HandleFunc("/wa/unpair", waClient.HandleUnpair)
 	} else {
 		// Static "not configured" status so the web UI can render its
 		// WhatsApp panel without conditionally fetching.
-		mux.HandleFunc("/wa/status", func(w http.ResponseWriter, r *http.Request) {
+		base.HandleFunc("/wa/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write([]byte(`{"configured":false,"paired":false,"recipients":[],"hasQR":false}`))
@@ -485,13 +516,40 @@ func main() {
 	// The plain HTTP listener stays even when tailnet is enabled — it
 	// serves liveness/readiness probes from kubelet and any in-cluster
 	// access. Tailnet clients use the HTTPS listener below.
+	var lanHandler, tsHandler http.Handler = base, base
+	var guestFunnel net.Listener
+	var guestSrv *http.Server
+	switch {
+	case cfg.Guest == nil:
+	case ts == nil:
+		log.Printf("guest: guest access needs -tailscale; guest access disabled")
+	default:
+		store, err := OpenGuestStore(cfg.Guest.StorePath)
+		if err != nil {
+			log.Fatalf("guest store: %v", err)
+		}
+		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors})
+		admin := NewGuestAdmin(store, cfg.Guest.PublicBase)
+		lanHandler, tsHandler = buildSurfaces(base, admin.Routes())
+
+		// Funnel needs the "funnel" node attribute in the tailnet ACL; without
+		// it we keep running, just without guest access.
+		guestFunnel, err = ts.ListenFunnel("tcp", ":8443")
+		if err != nil {
+			log.Printf("centsys/guest: Funnel unavailable — enable the funnel node attribute in the tailnet ACL; guest access disabled: %v", err)
+			guestFunnel = nil
+		} else {
+			guestSrv = &http.Server{Handler: guestAPI.Routes(), ReadHeaderTimeout: 10 * time.Second}
+		}
+	}
+
 	plainSrv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           mux,
+		Handler:           lanHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	tsSrv := &http.Server{
-		Handler:           mux,
+		Handler:           tsHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -521,6 +579,15 @@ func main() {
 		})
 	}
 
+	if guestSrv != nil {
+		wg.Go(func() {
+			log.Printf("camonitor guest Funnel listening on :8443")
+			if err := guestSrv.Serve(guestFunnel); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverErr <- fmt.Errorf("guest funnel: %w", err)
+			}
+		})
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -535,6 +602,9 @@ func main() {
 	defer cancelShut()
 	_ = plainSrv.Shutdown(shutCtx)
 	_ = tsSrv.Shutdown(shutCtx)
+	if guestSrv != nil {
+		_ = guestSrv.Shutdown(shutCtx)
+	}
 	cancel()
 	wg.Wait()
 }
