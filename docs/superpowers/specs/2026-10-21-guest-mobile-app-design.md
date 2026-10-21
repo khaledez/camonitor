@@ -119,10 +119,15 @@ to the shared mux:
   **tsnet listener only**. Never on `:8080`, or the whole LAN could mint
   enrollment codes and revoke guests.
 - **Guest API** (enroll, open, stream) → the **Funnel listener only**.
-- **`:8080`** keeps only the existing health probe. No door, camera, admin,
-  or guest route is ever served there.
+- **`:8080` keeps its current routes unchanged** — the existing UI, doors,
+  cameras and health probe stay exactly as they are today (that LAN access
+  is relied on). The only rule is that the *new* admin and guest routes are
+  never registered on it.
 
-This also means the mux is split by listener rather than shared.
+So the listeners get distinct muxes: the existing routes are served on both
+`:8080` and tsnet (as now); admin routes are added to the tsnet mux only; the
+guest routes are their own mux on the Funnel listener. A shared base
+registration avoids duplicating the existing routes.
 
 ### Identity, enrollment, revocation
 
