@@ -526,7 +526,9 @@ func main() {
 	default:
 		store, err := OpenGuestStore(cfg.Guest.StorePath)
 		if err != nil {
-			log.Fatalf("guest store: %v", err)
+			// A bad guests.json must not take cameras and doors down with it.
+			log.Printf("guest: open store %q failed: %v; guest access disabled", cfg.Guest.StorePath, err)
+			break
 		}
 		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors})
 		admin := NewGuestAdmin(store, cfg.Guest.PublicBase)
@@ -536,7 +538,7 @@ func main() {
 		// it we keep running, just without guest access.
 		guestFunnel, err = ts.ListenFunnel("tcp", ":8443")
 		if err != nil {
-			log.Printf("centsys/guest: Funnel unavailable — enable the funnel node attribute in the tailnet ACL; guest access disabled: %v", err)
+			log.Printf("guest: Funnel unavailable — enable the funnel node attribute in the tailnet ACL; guest access disabled: %v", err)
 			guestFunnel = nil
 		} else {
 			guestSrv = &http.Server{Handler: guestAPI.Routes(), ReadHeaderTimeout: 10 * time.Second}
