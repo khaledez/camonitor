@@ -26,3 +26,14 @@ func pruneAuditDaily(audit *AuditStore) {
 		}
 	}
 }
+
+// buildGuestFunnel is the public surface: door buttons plus, when cameras are
+// configured (stream != nil), the stream routes. Cam paths 404 otherwise.
+func buildGuestFunnel(guest *GuestAPI, stream *StreamAPI) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/", guest.Routes())
+	if stream != nil {
+		mux.Handle("/guest/cam/", stream.Routes())
+	}
+	return mux
+}

@@ -535,6 +535,7 @@ func main() {
 	var lanHandler, tsHandler http.Handler = base, base
 	var guestFunnel net.Listener
 	var guestSrv *http.Server
+	var streamHub *StreamHub
 	switch {
 	case cfg.Guest == nil:
 	case ts == nil:
@@ -556,6 +557,17 @@ func main() {
 		}
 		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors}, audit)
 		admin := NewGuestAdmin(store, cfg.Guest.PublicBase, audit)
+
+		var streamAPI *StreamAPI
+		if len(cfg.Guest.Cameras) > 0 {
+			// Idle must outlast gaps between a player's requests: each request only holds a viewer ref while it runs.
+			streamHub = NewStreamHub(cfg.Guest.Cameras, 30*time.Second)
+			streamAPI, err = NewStreamAPI(store, streamHub, []byte(cfg.Guest.StreamSecret), audit)
+			if err != nil {
+				log.Printf("guest: camera streaming disabled: %v", err)
+				streamAPI = nil
+			}
+		}
 		lanHandler, tsHandler = buildSurfaces(base, admin.Routes())
 
 		// Funnel needs the "funnel" node attribute in the tailnet ACL; without
@@ -565,7 +577,7 @@ func main() {
 			log.Printf("guest: Funnel unavailable — enable the funnel node attribute in the tailnet ACL; guest access disabled: %v", err)
 			guestFunnel = nil
 		} else {
-			guestSrv = &http.Server{Handler: guestAPI.Routes(), ReadHeaderTimeout: 10 * time.Second}
+			guestSrv = &http.Server{Handler: buildGuestFunnel(guestAPI, streamAPI), ReadHeaderTimeout: 10 * time.Second}
 		}
 	}
 
@@ -630,6 +642,9 @@ func main() {
 	_ = tsSrv.Shutdown(shutCtx)
 	if guestSrv != nil {
 		_ = guestSrv.Shutdown(shutCtx)
+	}
+	if streamHub != nil {
+		streamHub.Close()
 	}
 	cancel()
 	wg.Wait()

@@ -101,3 +101,71 @@ func TestGuestCamerasRequireStreamSecret(t *testing.T) {
 		t.Errorf("rejected guest block without cameras: %v", err)
 	}
 }
+
+func newFunnelTest(t *testing.T, withCameras bool) (*GuestStore, *AuditStore, http.Handler) {
+	t.Helper()
+	store, err := OpenGuestStore(filepath.Join(t.TempDir(), "guests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := OpenAuditStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guestAPI := NewGuestAPI(store, &fakeActions{}, audit)
+	var streamAPI *StreamAPI
+	if withCameras {
+		streamAPI, err = NewStreamAPI(store, fakeHub{}, testStreamSecret, audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store, audit, buildGuestFunnel(guestAPI, streamAPI)
+}
+
+func TestFunnelServesCamRoutesBehindToken(t *testing.T) {
+	_, _, funnel := newFunnelTest(t, true)
+	if got := do(funnel, "/guest/cam/10/session", "", "").Code; got != http.StatusUnauthorized {
+		t.Errorf("cam session without token = %d, want 401", got)
+	}
+}
+
+func TestFunnelWithoutCamerasHas404CamAndWorkingGate(t *testing.T) {
+	store, _, funnel := newFunnelTest(t, false)
+	_, token := enrolledToken(t, store)
+	if got := do(funnel, "/guest/cam/10/session", "", token).Code; got != http.StatusNotFound {
+		t.Errorf("cam session = %d, want 404", got)
+	}
+	if got := do(funnel, "/guest/gate/open", "", token).Code; got != http.StatusNoContent {
+		t.Errorf("gate = %d, want 204", got)
+	}
+}
+
+func TestCamRoutesNotOnAdminSurfaces(t *testing.T) {
+	base := http.NewServeMux()
+	lan, ts := buildSurfaces(base, http.NotFoundHandler())
+	for name, h := range map[string]http.Handler{"lan": lan, "ts": ts} {
+		if got := do(h, "/guest/cam/10/session", "", "").Code; got != http.StatusNotFound {
+			t.Errorf("%s cam session = %d, want 404", name, got)
+		}
+	}
+}
+
+func TestForgetRevokesCallerAndAudits(t *testing.T) {
+	store, audit, funnel := newFunnelTest(t, false)
+	guest, token := enrolledToken(t, store)
+
+	if got := do(funnel, "/guest/forget", "", "").Code; got != http.StatusUnauthorized {
+		t.Errorf("forget without token = %d, want 401", got)
+	}
+	if got := do(funnel, "/guest/forget", "", token).Code; got != http.StatusNoContent {
+		t.Fatalf("forget = %d, want 204", got)
+	}
+	if _, ok := store.Authenticate(token); ok {
+		t.Error("token still authenticates after forget")
+	}
+	events, err := audit.List(AuditFilter{Action: "forget", GuestID: guest.ID})
+	if err != nil || len(events) != 1 || events[0].Result != "success" {
+		t.Errorf("forget audit = %+v, err %v", events, err)
+	}
+}

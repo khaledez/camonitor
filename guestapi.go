@@ -16,7 +16,7 @@ type guestActions interface {
 	OpenOutdoor(ctx context.Context) error
 }
 
-// GuestAPI is the public (Funnel-facing) surface: exactly three routes.
+// GuestAPI is the public (Funnel-facing) surface: enroll, door buttons and self-revoke.
 type GuestAPI struct {
 	store   *GuestStore
 	actions guestActions
@@ -39,7 +39,26 @@ func (a *GuestAPI) Routes() http.Handler {
 	mux.HandleFunc("POST /guest/enroll", a.enroll)
 	mux.HandleFunc("POST /guest/gate/open", a.requireToken("gate", a.actions.OpenGate))
 	mux.HandleFunc("POST /guest/outdoor/open", a.requireToken("outdoor", a.actions.OpenOutdoor))
+	mux.HandleFunc("POST /guest/forget", a.forget)
 	return mux
+}
+
+// forget is the guest's own "remove access from this phone": revoke the caller's device.
+func (a *GuestAPI) forget(w http.ResponseWriter, r *http.Request) {
+	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	guest, ok := a.store.Authenticate(token)
+	if !hasBearer || !ok {
+		a.record(r, AuditEvent{Action: "forget", Result: "denied", GuestLabel: "unknown"})
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := a.store.Revoke(guest.ID); err != nil {
+		a.record(r, AuditEvent{Action: "forget", Result: "failed", GuestID: guest.ID, GuestLabel: guest.Label})
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	a.record(r, AuditEvent{Action: "forget", Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *GuestAPI) enroll(w http.ResponseWriter, r *http.Request) {
