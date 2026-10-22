@@ -339,47 +339,48 @@
   #centsys button.act:disabled { opacity: .5; cursor: default; }
   #centsys .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.6; }
   #centsys-toggle.out { box-shadow: 0 0 0 1px #f0c060; }
-  /* Guests admin — tailnet-only; toggle stays hidden if /admin/guests isn't served. */
+  /* Guests admin overlay — tailnet-only; toggle stays hidden if /admin/guests isn't served. */
   #guests {
-    position: fixed; inset: 0; z-index: 20;
-    background: rgba(0,0,0,0.6);
-    display: none; align-items: center; justify-content: center;
+    position: fixed; inset: 0; z-index: 20; background: #0e0e10; color: #d6d6d6;
+    display: none; flex-direction: column; overflow-y: auto;
   }
   #guests.open { display: flex; }
-  #guests .card {
-    width: 360px; max-height: 90vh; overflow-y: auto; background: #161618;
-    border: 1px solid #2a2a2e; border-radius: 8px;
+  #guests .bar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    background: #1c1c20; border-bottom: 1px solid #2a2a2e; position: sticky; top: 0;
   }
-  #guests h2 {
-    margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600;
-    background: #1c1c20; border-bottom: 1px solid #2a2a2e;
-    display: flex; align-items: center; gap: 8px;
-  }
-  #guests h2 .close { margin-left: auto; }
-  #guests .section { padding: 12px 16px; border-bottom: 1px solid #2a2a2e; }
-  #guests .section:last-child { border-bottom: none; }
-  #guests ul { list-style: none; margin: 0; padding: 0; font-size: 12px; }
-  #guests li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #2a2a2e; color: #d6d6d6; }
-  #guests li:last-child { border-bottom: none; }
-  #guests li .name { flex: 1; }
-  #guests li .when { color: #888; }
+  #guests .bar .tabs { display: flex; gap: 4px; margin-left: 12px; }
+  #guests .tab.active { background: #2a3550; color: #cfe0ff; border-color: #3a4a70; }
+  #guests .body { padding: 16px; max-width: 960px; width: 100%; box-sizing: border-box; margin: 0 auto; }
+  #guests .head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  #guests .head h3 { margin: 0; font-size: 14px; flex: 1; }
+  #guests table { width: 100%; border-collapse: collapse; font-size: 12px; background: #161618; }
+  #guests th { text-align: left; color: #888; font-weight: 600; padding: 8px; border-bottom: 1px solid #3a3a3f; }
+  #guests td { padding: 8px; border-bottom: 1px solid #2a2a2e; }
+  #guests td.muted { color: #888; }
+  #guests td.actions { text-align: right; }
   #guests .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; }
-  #guests .pill.Enrolled { background: #2d6a3e; color: #b8e0c0; }
-  #guests .pill.Pending  { background: #6a4a2d; color: #f0c060; }
-  #guests .pill.Revoked  { background: #3a3a3e; color: #aaa; }
-  #guests input {
-    width: 100%; box-sizing: border-box; padding: 8px; font-size: 13px;
+  #guests .pill.Active, #guests .pill.success { background: #1f3a29; color: #5ec97c; }
+  #guests .pill.Pending { background: #6a4a2d; color: #f0c060; }
+  #guests .pill.Revoked { background: #3a3a3e; color: #aaa; }
+  #guests .pill.denied, #guests .pill.failed { background: #3d2323; color: #d97070; }
+  #guests input, #guests select {
+    box-sizing: border-box; padding: 8px; font-size: 13px;
     background: #0e0e10; color: #d6d6d6; border: 1px solid #2a2a2e; border-radius: 4px;
   }
   #guests button.act {
-    margin-top: 8px; width: 100%; padding: 8px; font-size: 13px; font-weight: 600;
+    padding: 8px 14px; font-size: 13px; font-weight: 600;
     background: #2a3550; color: #cfe0ff; border: 1px solid #3a4a70; border-radius: 4px; cursor: pointer;
   }
-  #guests button.act:disabled { opacity: .5; cursor: default; }
-  #guests .invite { text-align: center; }
+  #guests button:disabled { opacity: .5; cursor: default; }
+  #guests .add-form { display: flex; gap: 8px; margin-bottom: 12px; }
+  #guests .add-form input { flex: 1; }
+  #guests .invite { text-align: center; background: #161618; border: 1px solid #2a2a2e; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
   #guests .invite img { width: 200px; height: 200px; background: #fff; border-radius: 4px; }
-  #guests .invite .link { word-break: break-all; font-size: 11px; color: #9ab; margin-top: 6px; }
-  #guests .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.6; }
+  #guests .invite .link { word-break: break-all; font-size: 11px; color: #9ab; margin: 6px 0; }
+  #guests .hint { font-size: 11px; color: #888; line-height: 1.6; }
+  #guests .empty { padding: 24px; text-align: center; color: #888; font-size: 13px; }
+  #guests .filters { display: flex; gap: 8px; }
 </style>
 </head>
 <body>
@@ -526,23 +527,54 @@
 </div>
 
 <div id="guests" aria-hidden="true">
-  <div class="card">
-    <h2>
-      Guests
-      <button class="close" id="gu-close">close</button>
-    </h2>
-    <div class="section"><ul id="gu-list"></ul></div>
-    <div class="section">
-      <input id="gu-label" placeholder="Guest label (e.g. Housekeeper)" maxlength="60" />
-      <button class="act" id="gu-add">Add guest</button>
-      <div class="hint" id="gu-msg"></div>
+  <div class="bar">
+    <button id="gu-close">← Cameras</button>
+    <div class="tabs">
+      <button class="tab active" id="gu-tab-manage">Manage</button>
+      <button class="tab" id="gu-tab-activity">Activity</button>
     </div>
-    <div class="section invite" id="gu-invite" hidden>
+  </div>
+
+  <div class="body" id="gu-manage">
+    <div class="head">
+      <h3>Guests</h3>
+      <button class="act" id="gu-new">Add guest</button>
+    </div>
+    <div class="add-form" id="gu-form" hidden>
+      <input id="gu-label" placeholder="Guest name (e.g. Housekeeper)" maxlength="60" />
+      <button class="act" id="gu-add">Create invite</button>
+    </div>
+    <div class="hint" id="gu-msg"></div>
+    <div class="invite" id="gu-invite" hidden>
       <img id="gu-qr" alt="Guest invite QR code" />
       <div class="link" id="gu-link"></div>
       <button class="act" id="gu-copy">Copy link</button>
       <div class="hint">Scan in the Home Access app. Single-use, expires ~10 minutes.</div>
     </div>
+    <table>
+      <thead><tr><th>Guest</th><th>Status</th><th>Last activity</th><th></th></tr></thead>
+      <tbody id="gu-list"></tbody>
+    </table>
+  </div>
+
+  <div class="body" id="gu-activity" hidden>
+    <div class="head">
+      <h3>Activity</h3>
+      <div class="filters">
+        <select id="au-guest"><option value="">All guests</option></select>
+        <select id="au-action">
+          <option value="">All actions</option>
+          <option value="enroll">Enroll</option>
+          <option value="gate">Gate</option>
+          <option value="outdoor">Outdoor</option>
+        </select>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>Time</th><th>Guest</th><th>Action</th><th>Result</th><th>Source</th></tr></thead>
+      <tbody id="au-list"></tbody>
+    </table>
+    <div class="empty" id="au-empty" hidden>No activity yet.</div>
   </div>
 </div>
 
@@ -1436,7 +1468,7 @@ refreshCentsys().then((st) => {
 });
 
 
-// ---- Guests admin (tailnet only) ---------------------------------------
+// ---- Guests admin overlay (tailnet only) --------------------------------
 
 const guEl = document.getElementById('guests');
 const guToggle = document.getElementById('guests-toggle');
@@ -1447,6 +1479,31 @@ const guMsg = document.getElementById('gu-msg');
 const guInvite = document.getElementById('gu-invite');
 const guQR = document.getElementById('gu-qr');
 const guLink = document.getElementById('gu-link');
+const guForm = document.getElementById('gu-form');
+const auGuest = document.getElementById('au-guest');
+const auAction = document.getElementById('au-action');
+const auList = document.getElementById('au-list');
+const auEmpty = document.getElementById('au-empty');
+
+function makeCell(text, className) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function makePill(text, className) {
+  const pill = document.createElement('span');
+  pill.className = 'pill ' + className;
+  pill.textContent = text;
+  return pill;
+}
+
+// Go zero time (never seen) arrives as year 1.
+function formatLastSeen(iso) {
+  const d = new Date(iso);
+  return d.getFullYear() < 2000 ? '—' : d.toLocaleString();
+}
 
 // The admin routes are not mounted on the LAN :8080 mux; any failure means
 // "not on the tailnet", so the toggle stays hidden.
@@ -1460,37 +1517,99 @@ async function refreshGuests() {
   guToggle.hidden = false;
 
   guList.innerHTML = '';
-  for (const g of guests.filter(g => !g.revoked)) {
-    const status = g.enrolled ? 'Enrolled' : 'Pending';
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = g.label;
-    const when = document.createElement('span');
-    when.className = 'when';
-    when.textContent = new Date(g.created).toLocaleDateString();
-    const pill = document.createElement('span');
-    pill.className = 'pill ' + status;
-    pill.textContent = status;
-    const revoke = document.createElement('button');
-    revoke.textContent = 'Revoke';
-    revoke.addEventListener('click', async () => {
-      revoke.disabled = true;
-      try {
-        const r = await fetch('/admin/guests/' + encodeURIComponent(g.id), { method: 'DELETE' });
-        if (!r.ok) throw new Error(await r.text());
-      } catch (e) {
-        guMsg.textContent = 'Could not revoke: ' + e.message;
-        revoke.disabled = false;
-        return;
-      }
-      refreshGuests();
-    });
-    li.append(name, when, pill, revoke);
-    guList.append(li);
+  for (const g of guests) {
+    const status = g.revoked ? 'Revoked' : g.enrolled ? 'Active' : 'Pending';
+    const tr = document.createElement('tr');
+    const statusCell = document.createElement('td');
+    statusCell.append(makePill(status, status));
+    const actions = makeCell('', 'actions');
+    if (status !== 'Revoked') {
+      const revoke = document.createElement('button');
+      revoke.textContent = status === 'Pending' ? 'Cancel' : 'Revoke';
+      revoke.addEventListener('click', async () => {
+        revoke.disabled = true;
+        try {
+          const r = await fetch('/admin/guests/' + encodeURIComponent(g.id), { method: 'DELETE' });
+          if (!r.ok) throw new Error(await r.text());
+        } catch (e) {
+          guMsg.textContent = 'Could not revoke: ' + e.message;
+          revoke.disabled = false;
+          return;
+        }
+        refreshGuests();
+      });
+      actions.append(revoke);
+    }
+    tr.append(makeCell(g.label), statusCell, makeCell(formatLastSeen(g.lastSeen), 'muted'), actions);
+    guList.append(tr);
   }
-  if (!guList.children.length) guList.textContent = 'No guests yet.';
+  if (!guests.length) {
+    const tr = document.createElement('tr');
+    const td = makeCell('No guests yet.', 'muted');
+    td.colSpan = 4;
+    tr.append(td);
+    guList.append(tr);
+  }
+
+  // Keep the Activity guest filter in sync, preserving the current choice.
+  const selected = auGuest.value;
+  auGuest.length = 1;
+  for (const g of guests) auGuest.add(new Option(g.label, g.id));
+  auGuest.value = selected;
 }
+
+// Audit fields include a client-supplied source IP/device: textContent only.
+async function refreshAudit() {
+  const params = new URLSearchParams();
+  if (auGuest.value) params.set('guest', auGuest.value);
+  if (auAction.value) params.set('action', auAction.value);
+  let events;
+  try {
+    const r = await fetch('/admin/audit?' + params);
+    if (!r.ok) throw new Error(await r.text());
+    events = await r.json();
+  } catch (e) {
+    auList.innerHTML = '';
+    auEmpty.textContent = 'Could not load activity: ' + e.message;
+    auEmpty.hidden = false;
+    return;
+  }
+  auList.innerHTML = '';
+  auEmpty.textContent = 'No activity yet.';
+  auEmpty.hidden = events.length > 0;
+  for (const ev of events) {
+    const resultCell = document.createElement('td');
+    resultCell.append(makePill(ev.result.charAt(0).toUpperCase() + ev.result.slice(1), ev.result));
+    const source = [ev.source_ip, ev.source_device].filter(Boolean).join(' · ');
+    const tr = document.createElement('tr');
+    tr.append(
+      makeCell(new Date(ev.time).toLocaleString(), 'muted'),
+      makeCell(ev.guest_label || '—'),
+      makeCell(ev.action),
+      resultCell,
+      makeCell(source, 'muted'),
+    );
+    auList.append(tr);
+  }
+}
+
+function showGuestTab(name) {
+  const isManage = name === 'manage';
+  document.getElementById('gu-manage').hidden = !isManage;
+  document.getElementById('gu-activity').hidden = isManage;
+  document.getElementById('gu-tab-manage').classList.toggle('active', isManage);
+  document.getElementById('gu-tab-activity').classList.toggle('active', !isManage);
+  if (isManage) refreshGuests(); else refreshAudit();
+}
+document.getElementById('gu-tab-manage').addEventListener('click', () => showGuestTab('manage'));
+document.getElementById('gu-tab-activity').addEventListener('click', () => showGuestTab('activity'));
+auGuest.addEventListener('change', refreshAudit);
+auAction.addEventListener('change', refreshAudit);
+
+document.getElementById('gu-new').addEventListener('click', () => {
+  guForm.hidden = false;
+  guLabel.focus();
+});
 
 guAdd.addEventListener('click', async () => {
   const label = guLabel.value.trim();
@@ -1508,6 +1627,7 @@ guAdd.addEventListener('click', async () => {
     guQR.src = g.qr;
     guLink.textContent = g.enrollURL + '?code=' + g.enrollCode;
     guInvite.hidden = false;
+    guForm.hidden = true;
     guLabel.value = '';
     guMsg.textContent = '';
     refreshGuests();
@@ -1528,10 +1648,9 @@ document.getElementById('gu-copy').addEventListener('click', async (e) => {
 });
 
 guToggle.addEventListener('click', () => {
-  const opening = !guEl.classList.contains('open');
-  guEl.classList.toggle('open');
-  guEl.setAttribute('aria-hidden', !opening);
-  if (opening) refreshGuests();
+  guEl.classList.add('open');
+  guEl.setAttribute('aria-hidden', 'false');
+  showGuestTab('manage');
 });
 function closeGuests() {
   guEl.classList.remove('open');
@@ -1540,10 +1659,10 @@ function closeGuests() {
   guInvite.hidden = true;
   guQR.src = '';
   guLink.textContent = '';
+  guForm.hidden = true;
   document.getElementById('gu-copy').textContent = 'Copy link';
 }
 document.getElementById('gu-close').addEventListener('click', closeGuests);
-guEl.addEventListener('click', (e) => { if (e.target === guEl) closeGuests(); });
 refreshGuests();
 
 // One initial WA status check so we can show the pairing alert immediately
