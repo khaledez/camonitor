@@ -1579,7 +1579,9 @@ async function refreshAudit() {
   auEmpty.hidden = events.length > 0;
   for (const ev of events) {
     const resultCell = document.createElement('td');
-    resultCell.append(makePill(ev.result.charAt(0).toUpperCase() + ev.result.slice(1), ev.result));
+    const result = String(ev.result || '');
+    const knownResult = ['success', 'denied', 'failed'].includes(result);
+    resultCell.append(makePill(result.charAt(0).toUpperCase() + result.slice(1), knownResult ? result : ''));
     const source = [ev.source_ip, ev.source_device].filter(Boolean).join(' · ');
     const tr = document.createElement('tr');
     tr.append(

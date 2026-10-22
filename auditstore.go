@@ -118,7 +118,7 @@ func (s *AuditStore) List(f AuditFilter) ([]AuditEvent, error) {
 		if err := rows.Scan(&ts, &e.GuestID, &e.GuestLabel, &e.Action, &e.Result, &e.SourceIP, &e.SourceDevice); err != nil {
 			return nil, err
 		}
-		e.Time = time.Unix(ts, 0)
+		e.Time = time.Unix(ts, 0).UTC()
 		out = append(out, e)
 	}
 	return out, rows.Err()

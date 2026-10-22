@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -37,6 +38,7 @@ func (a *GuestAdmin) listAudit(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(q.Get("limit")) // bad/missing -> 0 -> store default
 	events, err := a.audit.List(AuditFilter{GuestID: q.Get("guest"), Action: q.Get("action"), Limit: limit})
 	if err != nil {
+		log.Printf("admin audit list: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
