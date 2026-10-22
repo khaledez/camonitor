@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -24,8 +27,13 @@ type StreamAPI struct {
 	audit  *AuditStore // nil disables auditing
 }
 
-func NewStreamAPI(store *GuestStore, hub streamHandlers, secret []byte, audit *AuditStore) *StreamAPI {
-	return &StreamAPI{store: store, hub: hub, secret: secret, audit: audit}
+const minStreamSecretLen = 32
+
+func NewStreamAPI(store *GuestStore, hub streamHandlers, secret []byte, audit *AuditStore) (*StreamAPI, error) {
+	if len(secret) < minStreamSecretLen {
+		return nil, errors.New("stream secret must be at least 32 bytes")
+	}
+	return &StreamAPI{store: store, hub: hub, secret: secret, audit: audit}, nil
 }
 
 func (a *StreamAPI) Routes() http.Handler {
@@ -76,5 +84,48 @@ func (a *StreamAPI) hls(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.StripPrefix("/guest/cam/"+camera+"/hls", hub).ServeHTTP(w, r)
+	served := http.StripPrefix("/guest/cam/"+camera+"/hls", hub)
+	if !strings.HasSuffix(r.URL.Path, ".m3u8") {
+		served.ServeHTTP(w, r)
+		return
+	}
+	// Players fetch child URIs verbatim and won't add our query, so stamp the
+	// same ?s= on each one; they then share this request's expiry window.
+	rec := httptest.NewRecorder()
+	served.ServeHTTP(rec, r)
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.Header().Del("Content-Length")
+	w.WriteHeader(rec.Code)
+	if rec.Code != http.StatusOK {
+		w.Write(rec.Body.Bytes())
+		return
+	}
+	w.Write([]byte(signPlaylistURIs(rec.Body.String(), r.URL.Query().Get("s"))))
+}
+
+var tagURIAttr = regexp.MustCompile(`URI="([^"]*)"`)
+
+func signPlaylistURIs(playlist, sig string) string {
+	lines := strings.Split(playlist, "\n")
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "#"):
+			lines[i] = tagURIAttr.ReplaceAllStringFunc(line, func(m string) string {
+				return `URI="` + addQuery(m[len(`URI="`):len(m)-1], sig) + `"`
+			})
+		case strings.TrimSpace(line) != "":
+			lines[i] = addQuery(strings.TrimRight(line, "\r"), sig) + line[len(strings.TrimRight(line, "\r")):]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func addQuery(uri, sig string) string {
+	sep := "?"
+	if strings.Contains(uri, "?") {
+		sep = "&"
+	}
+	return uri + sep + "s=" + url.QueryEscape(sig)
 }

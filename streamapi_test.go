@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,11 +18,15 @@ func (fakeHub) Handler(camera string) (http.Handler, bool) {
 		return nil, false
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			w.Write([]byte(llhlsPlaylist))
+			return
+		}
 		w.Write([]byte("hub:" + r.URL.Path))
 	}), true
 }
 
-var testStreamSecret = []byte("test-secret")
+var testStreamSecret = []byte("test-secret-test-secret-test-secret!")
 
 func newStreamTestAPI(t *testing.T) (*GuestStore, *AuditStore, http.Handler) {
 	t.Helper()
@@ -33,7 +38,11 @@ func newStreamTestAPI(t *testing.T) (*GuestStore, *AuditStore, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return store, audit, NewStreamAPI(store, fakeHub{}, testStreamSecret, audit).Routes()
+	api, err := NewStreamAPI(store, fakeHub{}, testStreamSecret, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, audit, api.Routes()
 }
 
 func get(h http.Handler, target string) *httptest.ResponseRecorder {
@@ -97,7 +106,7 @@ func TestSessionGrantsSignedURL(t *testing.T) {
 		t.Fatalf("bad event %+v", e)
 	}
 	// the returned URL works with no Authorization header
-	if rec := get(h, resp.URL); rec.Code != 200 || rec.Body.String() != "hub:/index.m3u8" {
+	if rec := get(h, resp.URL); rec.Code != 200 || !strings.Contains(rec.Body.String(), "seg7.mp4?s=") {
 		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
 	}
 }
@@ -120,5 +129,41 @@ func TestHLSSignatureChecks(t *testing.T) {
 		if rec := get(h, c.target); rec.Code != c.want {
 			t.Errorf("%s: got %d want %d", c.target, rec.Code, c.want)
 		}
+	}
+}
+
+const llhlsPlaylist = `#EXTM3U
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-PART:DURATION=0.5,URI="part1.mp4?x=1"
+#EXTINF:2.0,
+seg7.mp4
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part2.mp4"
+`
+
+func TestPlaylistChildURIsAreSigned(t *testing.T) {
+	_, _, h := newStreamTestAPI(t)
+	sig := signStream(testStreamSecret, "front", time.Now().Add(time.Minute))
+	rec := get(h, "/guest/cam/front/hls/index.m3u8?s="+sig)
+	if rec.Code != 200 {
+		t.Fatalf("got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`URI="init.mp4?s=`, `URI="part1.mp4?x=1&s=`, "\nseg7.mp4?s=", `URI="part2.mp4?s=`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in:\n%s", want, body)
+		}
+	}
+	seg := "/guest/cam/front/hls/seg7.mp4?s=" + sig
+	if rec := get(h, seg); rec.Code != 200 {
+		t.Fatalf("signed segment got %d", rec.Code)
+	}
+	if rec := get(h, "/guest/cam/front/hls/seg7.mp4"); rec.Code != 403 {
+		t.Fatalf("unsigned segment got %d", rec.Code)
+	}
+}
+
+func TestShortSecretRejected(t *testing.T) {
+	if _, err := NewStreamAPI(nil, fakeHub{}, []byte("short"), nil); err == nil {
+		t.Fatal("short secret accepted")
 	}
 }
