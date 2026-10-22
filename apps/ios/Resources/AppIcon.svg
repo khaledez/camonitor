@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#15323b"/>
+      <stop offset="0.55" stop-color="#1f4e5a"/>
+      <stop offset="1" stop-color="#2d7d8e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- sliding gate: top rail + angled brace + vertical slats -->
+  <g stroke="#eafcff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.96">
+    <rect x="236" y="330" width="552" height="364" rx="26"/>
+    <line x1="236" y1="694" x2="788" y2="330"/>
+    <line x1="372" y1="330" x2="372" y2="694"/>
+    <line x1="512" y1="330" x2="512" y2="694"/>
+    <line x1="652" y1="330" x2="652" y2="694"/>
+  </g>
+  <!-- slide arrow -->
+  <g stroke="#8be9d8" stroke-width="30" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <line x1="300" y1="770" x2="724" y2="770"/>
+    <polyline points="664,726 724,770 664,814"/>
+  </g>
+</svg>
