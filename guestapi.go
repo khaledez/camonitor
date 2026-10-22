@@ -20,17 +20,25 @@ type guestActions interface {
 type GuestAPI struct {
 	store   *GuestStore
 	actions guestActions
+	audit   *AuditStore // nil disables auditing
 }
 
-func NewGuestAPI(store *GuestStore, actions guestActions) *GuestAPI {
-	return &GuestAPI{store: store, actions: actions}
+func NewGuestAPI(store *GuestStore, actions guestActions, audit *AuditStore) *GuestAPI {
+	return &GuestAPI{store: store, actions: actions, audit: audit}
+}
+
+// record is best-effort: an audit failure must never change the HTTP outcome.
+func (a *GuestAPI) record(r *http.Request, e AuditEvent) {
+	e.Time = time.Now()
+	e.SourceIP, e.SourceDevice = clientSource(r)
+	_ = a.audit.Log(e)
 }
 
 func (a *GuestAPI) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /guest/enroll", a.enroll)
-	mux.HandleFunc("POST /guest/gate/open", a.requireToken(a.actions.OpenGate))
-	mux.HandleFunc("POST /guest/outdoor/open", a.requireToken(a.actions.OpenOutdoor))
+	mux.HandleFunc("POST /guest/gate/open", a.requireToken("gate", a.actions.OpenGate))
+	mux.HandleFunc("POST /guest/outdoor/open", a.requireToken("outdoor", a.actions.OpenOutdoor))
 	return mux
 }
 
@@ -43,8 +51,9 @@ func (a *GuestAPI) enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	token, _, err := a.store.Enroll(req.Code)
+	token, guest, err := a.store.Enroll(req.Code)
 	if errors.Is(err, ErrEnrollInvalid) || errors.Is(err, ErrEnrollExpired) {
+		a.record(r, AuditEvent{Action: "enroll", Result: "denied"})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -52,24 +61,29 @@ func (a *GuestAPI) enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	a.record(r, AuditEvent{Action: "enroll", Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 
 // requireToken authenticates the bearer token, then runs open with a short timeout.
-func (a *GuestAPI) requireToken(open func(context.Context) error) http.HandlerFunc {
+func (a *GuestAPI) requireToken(action string, open func(context.Context) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if _, ok := a.store.Authenticate(token); !hasBearer || !ok {
+		guest, ok := a.store.Authenticate(token)
+		if !hasBearer || !ok {
+			a.record(r, AuditEvent{Action: action, Result: "denied", GuestLabel: "unknown"})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), guestActionTimeout)
 		defer cancel()
 		if err := open(ctx); err != nil {
+			a.record(r, AuditEvent{Action: action, Result: "failed", GuestID: guest.ID, GuestLabel: guest.Label})
 			http.Error(w, "action failed", http.StatusBadGateway)
 			return
 		}
+		a.record(r, AuditEvent{Action: action, Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

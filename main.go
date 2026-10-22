@@ -533,7 +533,7 @@ func main() {
 			log.Printf("guest: open store %q failed: %v; guest access disabled", cfg.Guest.StorePath, err)
 			break
 		}
-		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors})
+		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors}, nil)
 		admin := NewGuestAdmin(store, cfg.Guest.PublicBase)
 		lanHandler, tsHandler = buildSurfaces(base, admin.Routes())
 
