@@ -129,6 +129,20 @@ door support) are explicitly set.
 The browser never sees `host` / `user` / `pass` — only `id` and `name` are
 sent to the page, so passwords don't cross the wire to the viewer.
 
+### Guest camera streams (NVR sub-channel)
+
+`guest.cameras` maps a camera id to the NVR's RTSP sub-stream URL:
+
+```
+rtsp://<user>:<pass>@192.168.88.210:554/cam/realmonitor?channel=N&subtype=1
+```
+
+`subtype=1` is the sub-stream. A low-res guest feed needs a sub-stream
+enabled on the Tiandy cameras; otherwise the feed is the 4640x1728 main
+stream. `guest.stream_secret` (HMAC key for signed stream URLs) is required
+whenever `guest.cameras` is set. Both values contain secrets: keep them in
+config only.
+
 ## HD vs SD
 
 Each tile boots in HD (Dahua main stream, `subtype=0`) and can be flipped

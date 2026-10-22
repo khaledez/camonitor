@@ -166,6 +166,11 @@ type GuestConfig struct {
 	PublicBase string `json:"public_base,omitempty"`
 	// AuditPath defaults to /var/lib/camonitor/guest-audit.db.
 	AuditPath string `json:"audit_path,omitempty"`
+	// Cameras maps camera id ("10", "15") to its upstream RTSP URL on the
+	// NVR sub-channel. Contains credentials; never log it.
+	Cameras map[string]string `json:"cameras,omitempty"`
+	// StreamSecret is the HMAC key for signing stream URLs.
+	StreamSecret string `json:"stream_secret,omitempty"`
 }
 
 // guestDoorActions binds the guest API's two buttons to the real openers.
@@ -204,6 +209,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Guest != nil && cfg.Guest.PublicBase == "" {
 		return nil, fmt.Errorf("%s: guest.public_base is required (e.g. https://monitor.<tailnet>.ts.net:8443)", path)
+	}
+	if cfg.Guest != nil && len(cfg.Guest.Cameras) > 0 && cfg.Guest.StreamSecret == "" {
+		return nil, fmt.Errorf("%s: guest.stream_secret is required when guest.cameras is set", path)
 	}
 	if cfg.Guest != nil && cfg.Guest.StorePath == "" {
 		cfg.Guest.StorePath = "/var/lib/camonitor/guests.json"

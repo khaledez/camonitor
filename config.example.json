@@ -26,6 +26,14 @@
     "store": "/var/lib/camonitor/homekit",
     "relock_after": "5s"
   },
+  "guest": {
+    "public_base": "https://monitor.example.ts.net:8443",
+    "cameras": {
+      "10": "rtsp://admin:REPLACE_ME@192.168.88.210:554/cam/realmonitor?channel=1&subtype=1",
+      "15": "rtsp://admin:REPLACE_ME@192.168.88.210:554/cam/realmonitor?channel=2&subtype=1"
+    },
+    "stream_secret": "REPLACE_WITH_LONG_RANDOM_STRING"
+  },
   "streams": [
     {
       "id": "vto1",

@@ -78,3 +78,26 @@ func TestGuestConfigDefaultsAuditPath(t *testing.T) {
 		t.Errorf("explicit = %q", got)
 	}
 }
+
+func TestGuestCamerasRequireStreamSecret(t *testing.T) {
+	load := func(guest string) error {
+		path := filepath.Join(t.TempDir(), "c.json")
+		body := `{"guest": ` + guest + `, "streams": [{"id": "vto1", "host": "192.168.88.200"}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadConfig(path)
+		return err
+	}
+	const base = `"public_base": "https://m.ts.net:8443"`
+	const cameras = `"cameras": {"10": "rtsp://u:p@192.168.88.210:554/x"}`
+	if load(`{`+base+`, `+cameras+`}`) == nil {
+		t.Error("accepted guest.cameras without stream_secret")
+	}
+	if err := load(`{` + base + `, ` + cameras + `, "stream_secret": "s"}`); err != nil {
+		t.Errorf("rejected cameras with secret: %v", err)
+	}
+	if err := load(`{` + base + `}`); err != nil {
+		t.Errorf("rejected guest block without cameras: %v", err)
+	}
+}
