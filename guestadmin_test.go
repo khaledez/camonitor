@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestAdmin(t *testing.T) (http.Handler, *GuestStore) {
@@ -17,7 +18,7 @@ func newTestAdmin(t *testing.T) (http.Handler, *GuestStore) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewGuestAdmin(store, "https://monitor.example.ts.net").Routes(), store
+	return NewGuestAdmin(store, "https://monitor.example.ts.net", nil).Routes(), store
 }
 
 func createGuest(t *testing.T, h http.Handler, label string) map[string]string {
@@ -118,5 +119,67 @@ func TestInviteURLFormat(t *testing.T) {
 	got := inviteURL("https://h:8443/guest/enroll", "ABC")
 	if got != "https://h:8443/guest/enroll?code=ABC" {
 		t.Fatalf("inviteURL = %q", got)
+	}
+}
+
+func newAuditAdmin(t *testing.T) (http.Handler, *AuditStore) {
+	t.Helper()
+	guests, err := OpenGuestStore(filepath.Join(t.TempDir(), "guests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := OpenAuditStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewGuestAdmin(guests, "https://monitor.example.ts.net", audit).Routes(), audit
+}
+
+func getAudit(t *testing.T, h http.Handler, query string) (string, []AuditEvent) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/audit"+query, nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var events []AuditEvent
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(rec.Body.String()), events
+}
+
+func TestAdminAuditReturnsEvents(t *testing.T) {
+	h, audit := newAuditAdmin(t)
+	now := time.Now()
+	audit.Log(AuditEvent{Time: now.Add(-time.Minute), GuestID: "g1", Action: "open_gate", Result: "ok"})
+	audit.Log(AuditEvent{Time: now, GuestID: "g2", Action: "open_outdoor", Result: "ok"})
+
+	_, events := getAudit(t, h, "")
+	if len(events) != 2 || events[0].GuestID != "g2" {
+		t.Fatalf("want 2 events newest-first, got %+v", events)
+	}
+}
+
+func TestAdminAuditFilters(t *testing.T) {
+	h, audit := newAuditAdmin(t)
+	audit.Log(AuditEvent{Time: time.Now(), GuestID: "g1", Action: "open_gate", Result: "ok"})
+	audit.Log(AuditEvent{Time: time.Now(), GuestID: "g2", Action: "open_outdoor", Result: "ok"})
+
+	if _, ev := getAudit(t, h, "?guest=g1"); len(ev) != 1 || ev[0].GuestID != "g1" {
+		t.Errorf("guest filter: %+v", ev)
+	}
+	if _, ev := getAudit(t, h, "?action=open_outdoor"); len(ev) != 1 || ev[0].GuestID != "g2" {
+		t.Errorf("action filter: %+v", ev)
+	}
+	if _, ev := getAudit(t, h, "?limit=1"); len(ev) != 1 {
+		t.Errorf("limit: %+v", ev)
+	}
+}
+
+func TestAdminAuditEmptyIsArray(t *testing.T) {
+	h, _ := newAuditAdmin(t)
+	if body, _ := getAudit(t, h, ""); body != "[]" {
+		t.Errorf("body = %q, want []", body)
 	}
 }

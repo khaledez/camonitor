@@ -164,6 +164,8 @@ type GuestConfig struct {
 	// PublicBase is the guest Funnel URL handed out in enroll links,
 	// e.g. https://monitor.<tailnet>.ts.net:8443.
 	PublicBase string `json:"public_base,omitempty"`
+	// AuditPath defaults to /var/lib/camonitor/guest-audit.db.
+	AuditPath string `json:"audit_path,omitempty"`
 }
 
 // guestDoorActions binds the guest API's two buttons to the real openers.
@@ -205,6 +207,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Guest != nil && cfg.Guest.StorePath == "" {
 		cfg.Guest.StorePath = "/var/lib/camonitor/guests.json"
+	}
+	if cfg.Guest != nil && cfg.Guest.AuditPath == "" {
+		cfg.Guest.AuditPath = "/var/lib/camonitor/guest-audit.db"
 	}
 	if len(cfg.Streams) == 0 {
 		return nil, fmt.Errorf("%s: no streams configured", path)
@@ -533,8 +538,16 @@ func main() {
 			log.Printf("guest: open store %q failed: %v; guest access disabled", cfg.Guest.StorePath, err)
 			break
 		}
-		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors}, nil)
-		admin := NewGuestAdmin(store, cfg.Guest.PublicBase)
+		audit, err := OpenAuditStore(cfg.Guest.AuditPath)
+		if err != nil {
+			// Audit is optional: degrade to a nil (no-op) store rather than lose guest access.
+			log.Printf("guest: open audit store %q failed: %v; audit disabled", cfg.Guest.AuditPath, err)
+			audit = nil
+		} else {
+			go pruneAuditDaily(audit)
+		}
+		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors}, audit)
+		admin := NewGuestAdmin(store, cfg.Guest.PublicBase, audit)
 		lanHandler, tsHandler = buildSurfaces(base, admin.Routes())
 
 		// Funnel needs the "funnel" node attribute in the tailnet ACL; without

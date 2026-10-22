@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -15,10 +16,11 @@ import (
 type GuestAdmin struct {
 	store      *GuestStore
 	funnelBase string
+	audit      *AuditStore
 }
 
-func NewGuestAdmin(store *GuestStore, funnelBase string) *GuestAdmin {
-	return &GuestAdmin{store: store, funnelBase: funnelBase}
+func NewGuestAdmin(store *GuestStore, funnelBase string, audit *AuditStore) *GuestAdmin {
+	return &GuestAdmin{store: store, funnelBase: funnelBase, audit: audit}
 }
 
 func (a *GuestAdmin) Routes() http.Handler {
@@ -26,7 +28,19 @@ func (a *GuestAdmin) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/guests", a.create)
 	mux.HandleFunc("GET /admin/guests", a.list)
 	mux.HandleFunc("DELETE /admin/guests/{id}", a.revoke)
+	mux.HandleFunc("GET /admin/audit", a.listAudit)
 	return mux
+}
+
+func (a *GuestAdmin) listAudit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit")) // bad/missing -> 0 -> store default
+	events, err := a.audit.List(AuditFilter{GuestID: q.Get("guest"), Action: q.Get("action"), Limit: limit})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, events)
 }
 
 func (a *GuestAdmin) create(w http.ResponseWriter, r *http.Request) {
