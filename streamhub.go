@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,6 +155,20 @@ func (h *StreamHub) startLocked(cam *streamCam) {
 	}()
 }
 
+// redactURL strips the credentialed URL (and bare password) from msg so NVR
+// creds never reach the log.
+func redactURL(msg, rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return msg
+	}
+	msg = strings.ReplaceAll(msg, rawURL, u.Host)
+	if pw, ok := u.User.Password(); ok && pw != "" {
+		msg = strings.ReplaceAll(msg, pw, "***")
+	}
+	return msg
+}
+
 // pull keeps one source connected until ctx is cancelled.
 func (h *StreamHub) pull(ctx context.Context, r *streamRun, url string) {
 	defer r.closeMuxer()
@@ -160,7 +176,7 @@ func (h *StreamHub) pull(ctx context.Context, r *streamRun, url string) {
 		err := h.newSource(url).Run(ctx, r.write)
 		r.closeMuxer()
 		if err != nil && ctx.Err() == nil {
-			log.Printf("streamhub: upstream error, retrying: %v", err)
+			log.Printf("streamhub: upstream error, retrying: %s", redactURL(err.Error(), url))
 		}
 		select {
 		case <-ctx.Done():
@@ -234,7 +250,9 @@ func (r *streamRun) write(codec *codecs.H265, pts int64, au [][]byte) error {
 		close(r.ready)
 	}
 	rel := pts - r.startPTS
-	ntp := r.startWall.Add(time.Duration(rel) * time.Second / h265ClockRate)
+	// Split seconds from the fraction: rel*time.Second overflows int64 after ~28h.
+	secs, frac := rel/h265ClockRate, rel%h265ClockRate
+	ntp := r.startWall.Add(time.Duration(secs)*time.Second + time.Duration(frac)*time.Second/h265ClockRate)
 	return r.muxer.WriteH265(r.track, ntp, rel, au)
 }
 
@@ -296,8 +314,10 @@ func (s *rtspH265Source) Run(ctx context.Context, onAU accessUnitFunc) error {
 		if err != nil {
 			return // incomplete frame or mid-frame join; wait for the next
 		}
+		// gohlslib reads the codec from its own goroutines, so once the first
+		// keyframe has gone out the shared pointer must never be written again.
 		for _, nalu := range au {
-			if len(nalu) < 2 {
+			if gotKeyframe || len(nalu) < 2 {
 				continue
 			}
 			switch h265.NALUType(nalu[0] >> 1 & 0x3f) {

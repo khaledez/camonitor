@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-const streamSessionTTL = 5 * time.Minute
+// The app must still treat a 403 on the stream as expiry and re-POST /session to renew.
+const streamSessionTTL = 15 * time.Minute
 
 type streamHandlers interface {
 	Handler(camera string) (http.Handler, bool)
@@ -67,6 +68,7 @@ func (a *StreamAPI) session(w http.ResponseWriter, r *http.Request) {
 	exp := time.Now().Add(streamSessionTTL)
 	a.record(r, AuditEvent{Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]any{
 		"url":     "/guest/cam/" + camera + "/hls/index.m3u8?s=" + url.QueryEscape(signStream(a.secret, camera, exp)),
 		"expires": exp.Unix(),
@@ -97,6 +99,7 @@ func (a *StreamAPI) hls(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.Header().Del("Content-Length")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(rec.Code)
 	if rec.Code != http.StatusOK {
 		w.Write(rec.Body.Bytes())
