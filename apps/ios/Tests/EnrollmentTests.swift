@@ -13,6 +13,9 @@ final class EnrollmentTests: XCTestCase {
     func testRejectsWrongPath()   { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/gate/open?code=X")) }
     func testRejectsMissingCode() { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/enroll")) }
     func testRejectsEmptyCode()   { XCTAssertNil(parseInviteQR("https://h.ts.net:8443/guest/enroll?code=")) }
+    func testTrimsPastedWhitespace() {
+        XCTAssertEqual(parseInviteQR("  https://h.ts.net:8443/guest/enroll?code=X\n")?.code, "X")
+    }
     func testRejectsNonURL()      { XCTAssertNil(parseInviteQR("hello world")) }
     func testRejectsHTTP()        { XCTAssertNil(parseInviteQR("http://h.ts.net/guest/enroll?code=X")) }
 }

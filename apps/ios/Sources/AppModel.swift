@@ -4,33 +4,43 @@ import Foundation
 final class AppModel: ObservableObject {
     enum Phase { case needsEnrollment, enrolled }
 
+    static let demoRefusal = String(localized: "Opening is turned off for this demo pass.")
+
     @Published var phase: Phase
     @Published var enrollError: String?
     @Published var actionStatus: String?
     @Published var actionSucceeded = false
     @Published var isOpening = false
+    @Published private(set) var session: Session?
 
     var makeClient: (URL) -> GuestClientProtocol = { GuestClient(apiBase: $0) }
-    private var session: Session?
     private var client: GuestClientProtocol?
     // Stops a rejected QR left in the camera frame from re-POSTing on every re-arm.
     private var lastRejectedCode: String?
 
     init() {
-        session = SessionStore.load()
-        phase = session == nil ? .needsEnrollment : .enrolled
+        let saved = SessionStore.load()
+        session = saved
+        phase = saved == nil ? .needsEnrollment : .enrolled
     }
 
+    /// Takes a scanned QR or a pasted invite link; both carry the same URL.
     func handleScanned(_ raw: String) async {
         guard let invite = parseInviteQR(raw) else {
-            enrollError = "That QR code is not a valid invite."
+            enrollError = String(localized: "That is not a valid invite.")
             return
         }
         if invite.code == lastRejectedCode { return }
         let newClient = makeClient(invite.apiBase)
         do {
-            let token = try await newClient.enroll(code: invite.code)
-            let newSession = Session(apiBase: invite.apiBase, token: token)
+            let enrolled = try await newClient.enroll(code: invite.code)
+            let newSession = Session(
+                apiBase: invite.apiBase,
+                token: enrolled.token,
+                label: enrolled.label,
+                created: enrolled.created.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                demo: enrolled.demo
+            )
             try SessionStore.save(newSession)
             session = newSession
             client = newClient
@@ -39,9 +49,9 @@ final class AppModel: ObservableObject {
             phase = .enrolled
         } catch GuestError.badCode {
             lastRejectedCode = invite.code
-            enrollError = "Invite expired or already used."
+            enrollError = String(localized: "Invite expired or already used.")
         } catch {
-            enrollError = "Could not enroll. Check your connection and try again."
+            enrollError = String(localized: "Could not set up access. Check your connection and try again.")
         }
     }
 
@@ -53,27 +63,58 @@ final class AppModel: ObservableObject {
         await open { try await $0.openOutdoor(token: $1) }
     }
 
+    /// A fresh signed stream URL, or nil when the server can't give one.
+    func streamURL(camera: String) async -> URL? {
+        guard let session else { return nil }
+        do {
+            return try await activeClient(session).cameraSession(camera: camera, token: session.token)
+        } catch GuestError.unauthorized {
+            resetToEnrollment()
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// "Remove access from this phone": tell the server, then wipe the key no matter what.
+    func forget() async {
+        if let session {
+            try? await activeClient(session).forget(token: session.token)
+        }
+        resetToEnrollment()
+    }
+
+    private func activeClient(_ session: Session) -> GuestClientProtocol {
+        client ?? makeClient(session.apiBase)
+    }
+
+    private func resetToEnrollment() {
+        SessionStore.clear()
+        session = nil
+        client = nil
+        actionStatus = nil
+        phase = .needsEnrollment
+    }
+
     private func open(_ action: (GuestClientProtocol, String) async throws -> Void) async {
         guard let session else { return }
-        let activeClient = client ?? makeClient(session.apiBase)
         isOpening = true
         defer { isOpening = false }
         do {
-            try await action(activeClient, session.token)
+            try await action(activeClient(session), session.token)
             actionSucceeded = true
-            actionStatus = "Opened"
+            actionStatus = String(localized: "Opened")
         } catch GuestError.unauthorized {
-            SessionStore.clear()
-            self.session = nil
-            client = nil
-            actionStatus = nil
-            phase = .needsEnrollment
+            resetToEnrollment()
+        } catch GuestError.forbidden {
+            actionSucceeded = false
+            actionStatus = Self.demoRefusal
         } catch GuestError.deviceUnavailable {
             actionSucceeded = false
-            actionStatus = "The door is not responding. Try again shortly."
+            actionStatus = String(localized: "The door is not responding. Try again shortly.")
         } catch {
             actionSucceeded = false
-            actionStatus = "Could not reach the server. Try again."
+            actionStatus = String(localized: "Could not reach the server. Try again.")
         }
     }
 }

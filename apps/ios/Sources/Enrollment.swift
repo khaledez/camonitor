@@ -6,7 +6,9 @@ struct Invite: Equatable {
 }
 
 func parseInviteQR(_ raw: String) -> Invite? {
-    guard var parts = URLComponents(string: raw) else { return nil }
+    // Pasted links often carry stray spaces or a trailing newline.
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard var parts = URLComponents(string: text) else { return nil }
 
     let isHTTPS = parts.scheme == "https"
     let hasHost = !(parts.host ?? "").isEmpty

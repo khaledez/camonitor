@@ -4,6 +4,12 @@ import Security
 struct Session: Codable, Equatable {
     let apiBase: URL
     let token: String
+    // Optional so sessions saved before the redesign (token + apiBase only) still load.
+    var label: String? = nil
+    var created: Date? = nil
+    var demo: Bool? = nil
+
+    var isDemo: Bool { demo ?? false }
 }
 
 /// The device token lives only in the Keychain, never in UserDefaults or logs.

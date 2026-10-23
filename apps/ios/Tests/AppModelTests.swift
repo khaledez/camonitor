@@ -2,17 +2,28 @@ import XCTest
 @testable import HomeAccess
 
 private final class FakeClient: GuestClientProtocol {
-    var enrollResult: Result<String, GuestError> = .success("tok")
+    var enrollResult: Result<Enrolled, GuestError> = .success(Enrolled(token: "tok", label: "Ahmed", created: 1761091200, demo: false))
     var openError: GuestError?
+    var cameraError: GuestError?
+    var forgetError: GuestError?
+    var forgetCalls = 0
     var enrollCalls = 0
     var lastToken: String?
 
-    func enroll(code: String) async throws -> String {
+    func enroll(code: String) async throws -> Enrolled {
         enrollCalls += 1
         return try enrollResult.get()
     }
     func openGate(token: String) async throws { lastToken = token; if let openError { throw openError } }
     func openOutdoor(token: String) async throws { lastToken = token; if let openError { throw openError } }
+    func cameraSession(camera: String, token: String) async throws -> URL {
+        if let cameraError { throw cameraError }
+        return URL(string: "https://api.example.com/guest/cam/\(camera)/hls/index.m3u8?s=x")!
+    }
+    func forget(token: String) async throws {
+        forgetCalls += 1
+        if let forgetError { throw forgetError }
+    }
 }
 
 @MainActor
@@ -122,5 +133,51 @@ final class AppModelTests: XCTestCase {
         await model.handleScanned(validQR)
         await model.handleScanned(validQR)
         XCTAssertEqual(fake.enrollCalls, 2)
+    }
+
+    func testEnrollStoresGuestDetails() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        XCTAssertEqual(model.session?.label, "Ahmed")
+        XCTAssertEqual(model.session?.created, Date(timeIntervalSince1970: 1761091200))
+        XCTAssertEqual(model.session?.isDemo, false)
+    }
+
+    func testDemoDoorRefusalKeepsEnrolledWithMessage() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        fake.openError = .forbidden
+        await model.openGate()
+        XCTAssertEqual(model.phase, .enrolled)
+        XCTAssertFalse(model.actionSucceeded)
+        XCTAssertEqual(model.actionStatus, AppModel.demoRefusal)
+    }
+
+    func testForgetClearsSessionEvenWhenServerFails() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        fake.forgetError = .network
+        await model.forget()
+        XCTAssertEqual(fake.forgetCalls, 1)
+        XCTAssertEqual(model.phase, .needsEnrollment)
+        XCTAssertNil(SessionStore.load())
+        XCTAssertNil(model.session)
+    }
+
+    func testStreamURLReturnsSignedURL() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        let url = await model.streamURL(camera: "15")
+        XCTAssertEqual(url?.path, "/guest/cam/15/hls/index.m3u8")
+    }
+
+    func testStreamUnauthorizedResetsToEnroll() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        fake.cameraError = .unauthorized
+        let url = await model.streamURL(camera: "10")
+        XCTAssertNil(url)
+        XCTAssertEqual(model.phase, .needsEnrollment)
+        XCTAssertNil(SessionStore.load())
     }
 }

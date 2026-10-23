@@ -33,10 +33,46 @@ final class GuestClientTests: XCTestCase {
         MockURLProtocol.handler = { req in
             XCTAssertEqual(req.httpMethod, "POST")
             XCTAssertEqual(req.url?.path, "/guest/enroll")
-            return (200, Data(#"{"token":"T"}"#.utf8))
+            return (200, Data(#"{"token":"T","label":"Ahmed","created":1761091200,"demo":true}"#.utf8))
         }
-        let token = try await client.enroll(code: "C")
-        XCTAssertEqual(token, "T")
+        let enrolled = try await client.enroll(code: "C")
+        XCTAssertEqual(enrolled.token, "T")
+        XCTAssertEqual(enrolled.label, "Ahmed")
+        XCTAssertEqual(enrolled.created, 1761091200)
+        XCTAssertEqual(enrolled.demo, true)
+    }
+
+    func testEnrollAcceptsTokenOnlyReply() async throws {
+        MockURLProtocol.handler = { _ in (200, Data(#"{"token":"T"}"#.utf8)) }
+        let enrolled = try await client.enroll(code: "C")
+        XCTAssertEqual(enrolled.token, "T")
+        XCTAssertNil(enrolled.label)
+    }
+
+    func testForbiddenMapsTo403() async {
+        MockURLProtocol.handler = { _ in (403, Data()) }
+        await assertThrows(.forbidden) { try await self.client.openGate(token: "T") }
+    }
+
+    func testCameraSessionReturnsAbsoluteSignedURL() async throws {
+        MockURLProtocol.handler = { req in
+            XCTAssertEqual(req.httpMethod, "POST")
+            XCTAssertEqual(req.url?.path, "/guest/cam/10/session")
+            XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer T")
+            return (200, Data(#"{"url":"/guest/cam/10/hls/index.m3u8?s=abc%2Bd","expires":1}"#.utf8))
+        }
+        let url = try await client.cameraSession(camera: "10", token: "T")
+        XCTAssertEqual(url.absoluteString, "https://h.ts.net:8443/guest/cam/10/hls/index.m3u8?s=abc%2Bd")
+    }
+
+    func testForgetPostsWithBearer() async throws {
+        MockURLProtocol.handler = { req in
+            XCTAssertEqual(req.httpMethod, "POST")
+            XCTAssertEqual(req.url?.path, "/guest/forget")
+            XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer T")
+            return (204, Data())
+        }
+        try await client.forget(token: "T")
     }
 
     func testEnrollBadCodeThrows() async {
