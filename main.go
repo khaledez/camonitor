@@ -171,7 +171,13 @@ type GuestConfig struct {
 	Cameras map[string]string `json:"cameras,omitempty"`
 	// StreamSecret is the HMAC key for signing stream URLs.
 	StreamSecret string `json:"stream_secret,omitempty"`
+	// DemoCode is a reusable enroll code for App Store review: it enrolls a
+	// guest who can watch cameras but never open doors. Unset = no demo.
+	DemoCode string `json:"demo_code,omitempty"`
 }
+
+// The demo code is long-lived and handed to Apple, so it must not be guessable.
+const minDemoCodeLen = 16
 
 // guestDoorActions binds the guest API's two buttons to the real openers.
 type guestDoorActions struct {
@@ -212,6 +218,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Guest != nil && len(cfg.Guest.Cameras) > 0 && cfg.Guest.StreamSecret == "" {
 		return nil, fmt.Errorf("%s: guest.stream_secret is required when guest.cameras is set", path)
+	}
+	if cfg.Guest != nil && cfg.Guest.DemoCode != "" && len(cfg.Guest.DemoCode) < minDemoCodeLen {
+		return nil, fmt.Errorf("%s: guest.demo_code must be at least %d characters", path, minDemoCodeLen)
 	}
 	if cfg.Guest != nil && cfg.Guest.StorePath == "" {
 		cfg.Guest.StorePath = "/var/lib/camonitor/guests.json"
@@ -556,6 +565,7 @@ func main() {
 			go pruneAuditDaily(audit)
 		}
 		guestAPI := NewGuestAPI(store, guestDoorActions{centsys: centsysCtrl, doors: doors}, audit)
+		guestAPI.DemoCode = cfg.Guest.DemoCode
 		admin := NewGuestAdmin(store, cfg.Guest.PublicBase, audit)
 
 		var streamAPI *StreamAPI

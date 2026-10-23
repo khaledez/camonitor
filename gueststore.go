@@ -36,6 +36,8 @@ type Guest struct {
 	LastSeen time.Time `json:"last_seen"`
 	Enrolled bool      `json:"enrolled"`
 	Revoked  bool      `json:"revoked"`
+	// Demo guests (App Store review) may watch cameras but never open doors.
+	Demo bool `json:"demo,omitempty"`
 }
 
 // guestRecord is what lands on disk: the public view plus the hashes.
@@ -144,6 +146,36 @@ func (s *GuestStore) Enroll(code string) (string, Guest, error) {
 	rec.Enrolled = true
 	rec.LastSeen = s.now()
 	if err := s.save(); err != nil {
+		return "", Guest{}, err
+	}
+	return token, rec.Guest, nil
+}
+
+// EnrollDemo creates an already-enrolled demo guest and returns its token.
+// Each scan of the shared demo code gets its own record, so every reviewer
+// device shows up in the admin list and can be revoked on its own.
+// shortcut: one record per scan, never pruned; fine for a handful of reviewers.
+func (s *GuestStore) EnrollDemo(label string) (string, Guest, error) {
+	id, err := randomBytes(8)
+	if err != nil {
+		return "", Guest{}, err
+	}
+	tokenBytes, err := randomBytes(32)
+	if err != nil {
+		return "", Guest{}, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	rec := &guestRecord{
+		Guest:     Guest{ID: hex.EncodeToString(id), Label: label, Created: now, LastSeen: now, Enrolled: true, Demo: true},
+		TokenHash: hashSecret(token),
+	}
+	s.guests = append(s.guests, rec)
+	if err := s.save(); err != nil {
+		s.guests = s.guests[:len(s.guests)-1]
 		return "", Guest{}, err
 	}
 	return token, rec.Guest, nil

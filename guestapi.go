@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -21,7 +22,12 @@ type GuestAPI struct {
 	store   *GuestStore
 	actions guestActions
 	audit   *AuditStore // nil disables auditing
+	// DemoCode, when set, is a reusable enroll code for App Store review:
+	// it enrolls a cameras-only demo guest. Empty disables it.
+	DemoCode string
 }
+
+const demoGuestLabel = "App Review (demo)"
 
 func NewGuestAPI(store *GuestStore, actions guestActions, audit *AuditStore) *GuestAPI {
 	return &GuestAPI{store: store, actions: actions, audit: audit}
@@ -70,7 +76,15 @@ func (a *GuestAPI) enroll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	token, guest, err := a.store.Enroll(req.Code)
+	isDemoCode := a.DemoCode != "" && subtle.ConstantTimeCompare([]byte(req.Code), []byte(a.DemoCode)) == 1
+	var token string
+	var guest Guest
+	var err error
+	if isDemoCode {
+		token, guest, err = a.store.EnrollDemo(demoGuestLabel)
+	} else {
+		token, guest, err = a.store.Enroll(req.Code)
+	}
 	if errors.Is(err, ErrEnrollInvalid) || errors.Is(err, ErrEnrollExpired) {
 		a.record(r, AuditEvent{Action: "enroll", Result: "denied"})
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -82,7 +96,12 @@ func (a *GuestAPI) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	a.record(r, AuditEvent{Action: "enroll", Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"token": token})
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":   token,
+		"label":   guest.Label,
+		"created": guest.Created.Unix(),
+		"demo":    guest.Demo,
+	})
 }
 
 // requireToken authenticates the bearer token, then runs open with a short timeout.
@@ -93,6 +112,11 @@ func (a *GuestAPI) requireToken(action string, open func(context.Context) error)
 		if !hasBearer || !ok {
 			a.record(r, AuditEvent{Action: action, Result: "denied", GuestLabel: "unknown"})
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if guest.Demo {
+			a.record(r, AuditEvent{Action: action, Result: "denied", GuestID: guest.ID, GuestLabel: guest.Label})
+			http.Error(w, "demo pass cannot open doors", http.StatusForbidden)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), guestActionTimeout)
