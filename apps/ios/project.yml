@@ -1,5 +1,6 @@
 name: HomeAccess
 options:
+  developmentLanguage: en
   deploymentTarget:
     iOS: "17.0"
 settings:

@@ -1,0 +1,44 @@
+/* Arabic copy for the guest app. Keys are the English source text. */
+
+"Abu Khaled's Home" = "دار أبو خالد";
+"Cameras" = "الكاميرات";
+"Live" = "مباشر";
+"Open" = "فتح";
+"Open gate" = "افتح البوابة";
+"Open outer door" = "افتح الباب الخارجي";
+"Gate" = "البوابة";
+"Outer door" = "الباب الخارجي";
+"Front camera" = "الكاميرا الأمامية";
+"Courtyard" = "الساحة";
+"Access granted by Khaled" = "الوصول ممنوح من خالد";
+"· Manage" = "· إدارة";
+"Access settings" = "إعدادات الوصول";
+
+"Access" = "الوصول";
+"What you can do" = "ما يمكنك فعله";
+"Open the gate" = "فتح البوابة";
+"Open the outer door" = "فتح الباب الخارجي";
+"Watch both cameras" = "مشاهدة الكاميرتين";
+"Not on demo pass" = "غير متاح في التصريح التجريبي";
+"This phone has access" = "هذا الهاتف لديه وصول";
+"This phone has a demo pass" = "هذا الهاتف لديه تصريح تجريبي";
+"Registered as %@ · granted by Khaled" = "مُسجَّل باسم %@ · مُنِح من خالد";
+"Granted by Khaled" = "مُنِح من خالد";
+"Since %@" = "منذ %@";
+"Remove access from this phone" = "إزالة الوصول من هذا الهاتف";
+"Remove access from this phone?" = "إزالة الوصول من هذا الهاتف؟";
+"Remove access" = "إزالة الوصول";
+"You will need a new invite from Khaled to get back in." = "ستحتاج إلى دعوة جديدة من خالد للدخول مجددًا.";
+"This deletes your key from this phone. You will need a new invite from Khaled to get back in." = "سيؤدي هذا إلى حذف مفتاحك من هذا الهاتف، وستحتاج إلى دعوة جديدة من خالد للدخول مجددًا.";
+
+"Scan the invite QR code from Khaled to set up access on this phone." = "امسح رمز QR للدعوة من خالد لإعداد الوصول على هذا الهاتف.";
+"Have an invite link instead?" = "لديك رابط دعوة بدلاً من ذلك؟";
+"Camera access is off. Turn it on in Settings, or paste the invite link below." = "الوصول إلى الكاميرا متوقف. فعّله من الإعدادات، أو الصق رابط الدعوة أدناه.";
+
+"Opening is turned off for this demo pass." = "الفتح غير متاح في هذا التصريح التجريبي.";
+"That is not a valid invite." = "هذه ليست دعوة صالحة.";
+"Invite expired or already used." = "انتهت صلاحية الدعوة أو استُخدمت من قبل.";
+"Could not set up access. Check your connection and try again." = "تعذّر إعداد الوصول. تحقق من الاتصال وحاول مجددًا.";
+"Opened" = "تم الفتح";
+"The door is not responding. Try again shortly." = "الباب لا يستجيب. حاول بعد قليل.";
+"Could not reach the server. Try again." = "تعذّر الوصول إلى الخادم. حاول مجددًا.";

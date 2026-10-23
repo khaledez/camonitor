@@ -13,28 +13,58 @@ struct EnrollView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if cameraBlocked {
-                Text("Camera access needed. Enable it in Settings.")
+            VStack(spacing: 6) {
+                Text("Abu Khaled's Home").font(.title2.bold())
+                Text("Scan the invite QR code from Khaled to set up access on this phone.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.secondaryText)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                QRScannerView { raw in
-                    Task {
-                        await model.handleScanned(raw)
-                        if model.phase == .needsEnrollment { scanAttempt += 1 }
-                    }
-                }
-                .id(scanAttempt)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
             }
+
+            scanner
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+
             if let error = model.enrollError {
-                Text(error).foregroundStyle(.red)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.danger)
+                    .multilineTextAlignment(.center)
             }
-            Text("Scan the invite QR code. Ask the owner for a new invite if it fails.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+
+            // For when the QR can't be pointed at (e.g. it's on this same phone): paste the invite link.
+            VStack(spacing: 8) {
+                Text("Have an invite link instead?")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.secondaryText)
+                PasteButton(payloadType: String.self) { strings in
+                    Task { @MainActor in await submit(strings.first ?? "") }
+                }
+                .tint(Theme.accent)
+                .labelStyle(.titleAndIcon)
+            }
         }
-        .padding()
+        .padding(20)
+        .background(Theme.background)
+    }
+
+    @ViewBuilder private var scanner: some View {
+        if cameraBlocked {
+            Text("Camera access is off. Turn it on in Settings, or paste the invite link below.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Theme.secondaryText)
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.card)
+        } else {
+            QRScannerView { raw in
+                Task { await submit(raw) }
+            }
+            .id(scanAttempt)
+        }
+    }
+
+    private func submit(_ raw: String) async {
+        await model.handleScanned(raw)
+        if model.phase == .needsEnrollment { scanAttempt += 1 }
     }
 }
