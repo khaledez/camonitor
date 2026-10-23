@@ -11,6 +11,7 @@ struct LiveVideo: View {
 
     @State private var player = AVPlayer()
     @State private var isPlaying = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         PlayerLayerView(player: player, fill: fill)
@@ -21,7 +22,12 @@ struct LiveVideo: View {
                 }
             }
             .onReceive(player.publisher(for: \.timeControlStatus)) { isPlaying = $0 == .playing }
-            .task(id: camera) { await keepPlaying() }
+            // iOS pauses video in the background and never resumes it, so the
+            // loop restarts (with a fresh URL) each time the app becomes active.
+            .task(id: PlaybackKey(camera: camera, isActive: scenePhase == .active)) {
+                guard scenePhase == .active else { player.pause(); return }
+                await keepPlaying()
+            }
             .onDisappear { player.pause() }
             .accessibilityLabel(Text(LocalizedStringKey(Camera.all.first { $0.id == camera }?.name ?? "")))
     }
@@ -37,12 +43,12 @@ struct LiveVideo: View {
             player.replaceCurrentItem(with: item)
             player.play()
             await untilRenewalNeeded(item)
-            if !Task.isCancelled { try? await Task.sleep(for: .seconds(1)) }
+            if !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) }
         }
         player.replaceCurrentItem(with: nil)
     }
 
-    /// Returns when the item fails, stops early, or its signed URL is about to expire.
+    /// Returns when the item fails, stalls, or its signed URL is about to expire.
     private func untilRenewalNeeded(_ item: AVPlayerItem) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { try? await Task.sleep(for: .seconds(14 * 60)) }
@@ -53,10 +59,19 @@ struct LiveVideo: View {
                 let failures = NotificationCenter.default.notifications(named: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
                 for await _ in failures { return }
             }
+            group.addTask {
+                let stalls = NotificationCenter.default.notifications(named: AVPlayerItem.playbackStalledNotification, object: item)
+                for await _ in stalls { return }
+            }
             await group.next()
             group.cancelAll()
         }
     }
+}
+
+private struct PlaybackKey: Equatable {
+    let camera: String
+    let isActive: Bool
 }
 
 private struct PlayerLayerView: UIViewRepresentable {
