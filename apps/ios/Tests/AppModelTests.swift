@@ -9,6 +9,7 @@ private final class FakeClient: GuestClientProtocol {
     var forgetCalls = 0
     var enrollCalls = 0
     var lastToken: String?
+    var cameraSessionCalls = 0
 
     func enroll(code: String) async throws -> Enrolled {
         enrollCalls += 1
@@ -17,6 +18,7 @@ private final class FakeClient: GuestClientProtocol {
     func openGate(token: String) async throws { lastToken = token; if let openError { throw openError } }
     func openOutdoor(token: String) async throws { lastToken = token; if let openError { throw openError } }
     func cameraSession(camera: String, token: String) async throws -> URL {
+        cameraSessionCalls += 1
         if let cameraError { throw cameraError }
         return URL(string: "https://api.example.com/guest/cam/\(camera)/hls/index.m3u8?s=x")!
     }
@@ -169,6 +171,16 @@ final class AppModelTests: XCTestCase {
         await model.handleScanned(validQR)
         let url = await model.streamURL(camera: "15")
         XCTAssertEqual(url?.path, "/guest/cam/15/hls/index.m3u8")
+    }
+
+    func testStreamURLIsReusedWithinItsLifetime() async {
+        let model = makeModel()
+        await model.handleScanned(validQR)
+        let first = await model.streamURL(camera: "10")
+        let second = await model.streamURL(camera: "10")
+        _ = await model.streamURL(camera: "15")
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(fake.cameraSessionCalls, 2, "one session per camera, not per call")
     }
 
     func testStreamUnauthorizedResetsToEnroll() async {

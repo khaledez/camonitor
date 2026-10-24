@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,12 @@ type StreamAPI struct {
 	hub    streamHandlers
 	secret []byte
 	audit  *AuditStore // nil disables auditing
+
+	// The app re-requests sessions often (every tile open, every player retry);
+	// logging each would bury real gate and door events in the audit view.
+	now          func() time.Time // injectable so tests can skip the throttle wait
+	mu           sync.Mutex
+	lastLoggedAt map[string]time.Time // guest ID + camera -> last logged session
 }
 
 const minStreamSecretLen = 32
@@ -34,7 +41,8 @@ func NewStreamAPI(store *GuestStore, hub streamHandlers, secret []byte, audit *A
 	if len(secret) < minStreamSecretLen {
 		return nil, errors.New("stream secret must be at least 32 bytes")
 	}
-	return &StreamAPI{store: store, hub: hub, secret: secret, audit: audit}, nil
+	return &StreamAPI{store: store, hub: hub, secret: secret, audit: audit,
+		now: time.Now, lastLoggedAt: map[string]time.Time{}}, nil
 }
 
 func (a *StreamAPI) Routes() http.Handler {
@@ -52,6 +60,20 @@ func (a *StreamAPI) record(r *http.Request, e AuditEvent) {
 	_ = a.audit.Log(e)
 }
 
+// shouldLogSession is true once per guest and camera per session TTL: "who
+// watched, and when" survives, the repeats do not.
+func (a *StreamAPI) shouldLogSession(guestID, camera string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := guestID + "/" + camera
+	now := a.now()
+	if last, seen := a.lastLoggedAt[key]; seen && now.Sub(last) < streamSessionTTL {
+		return false
+	}
+	a.lastLoggedAt[key] = now
+	return true
+}
+
 func (a *StreamAPI) session(w http.ResponseWriter, r *http.Request) {
 	camera := r.PathValue("camera")
 	token, hasBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -66,7 +88,9 @@ func (a *StreamAPI) session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exp := time.Now().Add(streamSessionTTL)
-	a.record(r, AuditEvent{Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
+	if a.shouldLogSession(guest.ID, camera) {
+		a.record(r, AuditEvent{Result: "success", GuestID: guest.ID, GuestLabel: guest.Label})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]any{

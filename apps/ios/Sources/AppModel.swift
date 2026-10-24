@@ -17,6 +17,10 @@ final class AppModel: ObservableObject {
     private var client: GuestClientProtocol?
     // Stops a rejected QR left in the camera frame from re-POSTing on every re-arm.
     private var lastRejectedCode: String?
+    // Player retries and tile re-opens would otherwise each mint a session; the
+    // signed URL stays valid for 15 minutes, so reuse it until just before expiry.
+    private var cachedStreams: [String: (url: URL, fetchedAt: Date)] = [:]
+    private static let streamReuseWindow: TimeInterval = 14 * 60
 
     init() {
         let saved = SessionStore.load()
@@ -66,8 +70,13 @@ final class AppModel: ObservableObject {
     /// A fresh signed stream URL, or nil when the server can't give one.
     func streamURL(camera: String) async -> URL? {
         guard let session else { return nil }
+        if let cached = cachedStreams[camera], Date().timeIntervalSince(cached.fetchedAt) < Self.streamReuseWindow {
+            return cached.url
+        }
         do {
-            return try await activeClient(session).cameraSession(camera: camera, token: session.token)
+            let url = try await activeClient(session).cameraSession(camera: camera, token: session.token)
+            cachedStreams[camera] = (url, Date())
+            return url
         } catch GuestError.unauthorized {
             resetToEnrollment()
             return nil
@@ -92,6 +101,7 @@ final class AppModel: ObservableObject {
         SessionStore.clear()
         session = nil
         client = nil
+        cachedStreams = [:]
         actionStatus = nil
         phase = .needsEnrollment
     }

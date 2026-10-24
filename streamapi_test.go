@@ -219,3 +219,36 @@ func TestShortSecretRejected(t *testing.T) {
 		t.Fatal("short secret accepted")
 	}
 }
+
+func TestRepeatedSessionsLogOncePerGuestAndCamera(t *testing.T) {
+	store, audit, h := newStreamTestAPI(t)
+	_, token := enrolledToken(t, store)
+	for range 3 {
+		if rec := do(h, "/guest/cam/front/session", "", token); rec.Code != 200 {
+			t.Fatalf("got %d", rec.Code)
+		}
+	}
+	onlyEvent(t, audit) // fails unless exactly one row was written
+}
+
+func TestSessionLogThrottleExpiresAfterTTL(t *testing.T) {
+	api, err := NewStreamAPI(nil, fakeHub{}, testStreamSecret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now()
+	api.now = func() time.Time { return clock }
+	if !api.shouldLogSession("g1", "10") {
+		t.Fatal("first session must be logged")
+	}
+	if api.shouldLogSession("g1", "10") {
+		t.Fatal("repeat inside the TTL must be skipped")
+	}
+	if !api.shouldLogSession("g1", "15") || !api.shouldLogSession("g2", "10") {
+		t.Fatal("other camera or guest must be logged")
+	}
+	clock = clock.Add(streamSessionTTL)
+	if !api.shouldLogSession("g1", "10") {
+		t.Fatal("session after the TTL must be logged again")
+	}
+}
