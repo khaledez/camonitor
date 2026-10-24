@@ -162,6 +162,58 @@ func TestPlaylistChildURIsAreSigned(t *testing.T) {
 	}
 }
 
+// queryEchoHub mimics gohlslib, which copies the request's query (minus the
+// _HLS_* params) onto every URI in the playlist it writes.
+type queryEchoHub struct{}
+
+func (queryEchoHub) Handler(camera string) (http.Handler, bool) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		q.Del("_HLS_msn")
+		q.Del("_HLS_part")
+		q.Del("_HLS_skip")
+		suffix := ""
+		if len(q) > 0 {
+			suffix = "?" + q.Encode()
+		}
+		w.Write([]byte("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4" + suffix + "\"\n#EXTINF:2.0,\nseg7.mp4" + suffix + "\n"))
+	}), true
+}
+
+// AVPlayer rebuilds the query on every playlist reload (reorders it, drops
+// duplicate params) and fails with -12312 if a URI changes between reloads.
+func TestPlaylistURIsDoNotDependOnRequestQuery(t *testing.T) {
+	store, err := OpenGuestStore(filepath.Join(t.TempDir(), "guests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewStreamAPI(store, queryEchoHub{}, testStreamSecret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.Routes()
+	sig := signStream(testStreamSecret, "front", time.Now().Add(time.Minute))
+	queries := []string{
+		"s=" + url.QueryEscape(sig),
+		"s=" + url.QueryEscape(sig) + "&s=" + url.QueryEscape(sig),
+		"_HLS_msn=3&_HLS_part=1&_HLS_skip=YES&s=" + url.QueryEscape(sig),
+	}
+	var first string
+	for i, q := range queries {
+		rec := get(h, "/guest/cam/front/hls/index.m3u8?"+q)
+		if rec.Code != 200 {
+			t.Fatalf("%q: got %d", q, rec.Code)
+		}
+		if i == 0 {
+			first = rec.Body.String()
+			continue
+		}
+		if rec.Body.String() != first {
+			t.Errorf("playlist differs for query %q:\n%s\nvs first:\n%s", q, rec.Body.String(), first)
+		}
+	}
+}
+
 func TestShortSecretRejected(t *testing.T) {
 	if _, err := NewStreamAPI(nil, fakeHub{}, []byte("short"), nil); err == nil {
 		t.Fatal("short secret accepted")

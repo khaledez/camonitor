@@ -77,10 +77,17 @@ func (a *StreamAPI) session(w http.ResponseWriter, r *http.Request) {
 
 func (a *StreamAPI) hls(w http.ResponseWriter, r *http.Request) {
 	camera := r.PathValue("camera")
-	if !verifyStream(a.secret, camera, r.URL.Query().Get("s"), time.Now()) {
+	sig := r.URL.Query().Get("s")
+	if !verifyStream(a.secret, camera, sig, time.Now()) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// gohlslib copies the request query onto every URI it writes, and AVPlayer
+	// rebuilds that query on each reload; it fails playback (-12312) if a URI
+	// changes between reloads. Hide our token so signPlaylistURIs is the only source.
+	query := r.URL.Query()
+	query.Del("s")
+	r.URL.RawQuery = query.Encode()
 	hub, known := a.hub.Handler(camera)
 	if !known {
 		http.NotFound(w, r)
@@ -105,7 +112,7 @@ func (a *StreamAPI) hls(w http.ResponseWriter, r *http.Request) {
 		w.Write(rec.Body.Bytes())
 		return
 	}
-	w.Write([]byte(signPlaylistURIs(rec.Body.String(), r.URL.Query().Get("s"))))
+	w.Write([]byte(signPlaylistURIs(rec.Body.String(), sig)))
 }
 
 var tagURIAttr = regexp.MustCompile(`URI="([^"]*)"`)
