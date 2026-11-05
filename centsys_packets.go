@@ -15,11 +15,7 @@ import (
 // Activation ids (cmd 03). A sliding/swing gate opens with TRG. The garage
 // RUN id (1) must never be sent to a gate — the operator reads id 1 as
 // Holiday Lock and would lock itself out — so camonitor only ever sends TRG.
-// PED (35) is the pedestrian input: a partial opening, too narrow for a car.
-const (
-	activationTRG = 34
-	activationPED = 35
-)
+const activationTRG = 34
 
 var centsysBaseKey = []byte{0x38, 0x98, 0x3f, 0xba, 0x4d, 0xbf, 0xab, 0x9c}
 
@@ -101,8 +97,7 @@ func buildCmd05(mac4 []byte, t time.Time) []byte {
 // caller appends the 4-byte challenge from the cmd 02 response.
 func buildCmd03Prefix(mac4 []byte, configVersion int) []byte {
 	body := []byte{byte(configVersion), 0, 0, 0}
-	// shortcut: sends PED while the TRG input is faulty, switch back to activationTRG once it's fixed.
-	binary.LittleEndian.PutUint16(body[2:], uint16(activationPED))
+	binary.LittleEndian.PutUint16(body[2:], uint16(activationTRG))
 	return append(centsysHeader(3), centsysXOR(body, centsysKey(mac4))...)
 }
 
