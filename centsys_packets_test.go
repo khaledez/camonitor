@@ -23,7 +23,7 @@ func TestCentsysPackets(t *testing.T) {
 		{"cmd01", "010101009473d99f4dbf8b1b87418de9", buildCmd01("+27831234567", mac4)},
 		{"cmd05", "01010500b96dd79d58b6b19c",
 			buildCmd05(mac4, time.Date(2026, 10, 21, 14, 30, 45, 0, time.UTC))},
-		{"cmd03_prefix", "010103009473fb9f", buildCmd03Prefix(mac4, 0)},
+		{"cmd03_prefix", "010103009473fa9f", buildCmd03Prefix(mac4, 0)}, // PED (35); TRG was ...fb9f
 	}
 	for _, c := range cases {
 		if got := hex.EncodeToString(c.got); got != c.want {
