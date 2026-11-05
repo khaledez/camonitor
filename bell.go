@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -228,9 +229,9 @@ func (b *BellBus) LatestSnapshot(streamID string) ([]byte, time.Time, bool) {
 	if !ok {
 		return nil, time.Time{}, false
 	}
-	for i := len(b.history) - 1; i >= 0; i-- {
-		if b.history[i].event.EventID == id {
-			h := b.history[i]
+	for _, h := range slices.Backward(b.history) {
+		if h.event.EventID == id {
+
 			return h.jpeg, h.event.Time, len(h.jpeg) > 0
 		}
 	}
@@ -241,9 +242,9 @@ func (b *BellBus) LatestSnapshot(streamID string) ([]byte, time.Time, bool) {
 func (b *BellBus) SnapshotByEvent(eventID string) ([]byte, time.Time, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i := len(b.history) - 1; i >= 0; i-- {
-		if b.history[i].event.EventID == eventID {
-			h := b.history[i]
+	for _, h := range slices.Backward(b.history) {
+		if h.event.EventID == eventID {
+
 			return h.jpeg, h.event.Time, len(h.jpeg) > 0
 		}
 	}

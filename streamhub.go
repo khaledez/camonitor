@@ -148,11 +148,9 @@ func (h *StreamHub) startLocked(cam *streamCam) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &streamRun{cancel: cancel, ready: make(chan struct{})}
 	cam.run = r
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
+	h.wg.Go(func() {
 		h.pull(ctx, r, cam.url)
-	}()
+	})
 }
 
 // redactURL strips the credentialed URL (and bare password) from msg so NVR

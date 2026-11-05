@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,9 +127,7 @@ func (a *StreamAPI) hls(w http.ResponseWriter, r *http.Request) {
 	// same ?s= on each one; they then share this request's expiry window.
 	rec := httptest.NewRecorder()
 	served.ServeHTTP(rec, r)
-	for k, v := range rec.Header() {
-		w.Header()[k] = v
-	}
+	maps.Copy(w.Header(), rec.Header())
 	w.Header().Del("Content-Length")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(rec.Code)

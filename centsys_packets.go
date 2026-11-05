@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/binary"
+	"strings"
 	"time"
 )
 
@@ -22,7 +23,7 @@ var centsysBaseKey = []byte{0x38, 0x98, 0x3f, 0xba, 0x4d, 0xbf, 0xab, 0x9c}
 // centsysKey derives the 8-byte obfuscation key from the first 4 MAC bytes.
 func centsysKey(mac4 []byte) []byte {
 	k := make([]byte, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		k[i] = centsysBaseKey[i]
 		if i < 4 {
 			k[i] ^= mac4[i]
@@ -46,12 +47,7 @@ func centsysHeader(packetType byte) []byte {
 // phoneParts packs the phone number's decimal digits as BCD into three
 // uint32 words, rightmost 8 digits in `upper`, exactly as the app does.
 func phoneParts(phone string) (lower, mid, upper uint32) {
-	s := ""
-	for _, r := range phone {
-		if r != '+' {
-			s += string(r)
-		}
-	}
+	s := strings.ReplaceAll(phone, "+", "")
 	n := len(s)
 	digit := func(idx int) uint32 { return uint32(s[idx] - '0') }
 	for i := 16; i < 24; i++ {
@@ -64,7 +60,7 @@ func phoneParts(phone string) (lower, mid, upper uint32) {
 			mid |= digit(n-i-1) << uint(((15-i)*4)&31)
 		}
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if i < n {
 			upper |= digit(n-i-1) << uint(((7-i)*4)&31)
 		}

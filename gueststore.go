@@ -45,7 +45,7 @@ type guestRecord struct {
 	Guest
 	TokenHash  string    `json:"token_hash,omitempty"`
 	CodeHash   string    `json:"code_hash,omitempty"`
-	CodeExpiry time.Time `json:"code_expiry,omitempty"`
+	CodeExpiry time.Time `json:"code_expiry"`
 }
 
 type GuestStore struct {
@@ -89,7 +89,7 @@ func (s *GuestStore) Create(label string) (Guest, string, error) {
 	defer s.mu.Unlock()
 	now := s.now()
 	rec := &guestRecord{
-		Guest:      Guest{ID: hex.EncodeToString(id), Label: label, Created: now},
+		ID: hex.EncodeToString(id), Label: label, Created: now,
 		CodeHash:   hashSecret(code),
 		CodeExpiry: now.Add(enrollCodeTTL),
 	}
@@ -170,7 +170,7 @@ func (s *GuestStore) EnrollDemo(label string) (string, Guest, error) {
 	defer s.mu.Unlock()
 	now := s.now()
 	rec := &guestRecord{
-		Guest:     Guest{ID: hex.EncodeToString(id), Label: label, Created: now, LastSeen: now, Enrolled: true, Demo: true},
+		ID: hex.EncodeToString(id), Label: label, Created: now, LastSeen: now, Enrolled: true, Demo: true,
 		TokenHash: hashSecret(token),
 	}
 	s.guests = append(s.guests, rec)

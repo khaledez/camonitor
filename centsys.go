@@ -397,7 +397,7 @@ func (c *CentsysController) Open(ctx context.Context) error {
 	// Activation. A stricter gate rejects config version 0 and reports the
 	// one it wants; retry once with that value.
 	cv := 0
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		packet := append(buildCmd03Prefix(cr.mac4, cv), challenge...)
 		if err := pub(tTrig, packet, 0, tTrigResp); err != nil {
 			return fmt.Errorf("centsys: cmd03: %w", err)

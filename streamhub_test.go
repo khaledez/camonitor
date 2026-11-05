@@ -57,10 +57,8 @@ func TestOnePullManyViewers(t *testing.T) {
 	var wg sync.WaitGroup
 	var releases []func()
 	var mu sync.Mutex
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 3 {
+		wg.Go(func() {
 			release, ok := h.acquire("10")
 			if !ok {
 				t.Error("acquire failed")
@@ -69,7 +67,7 @@ func TestOnePullManyViewers(t *testing.T) {
 			mu.Lock()
 			releases = append(releases, release)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	waitFor(t, "first open", func() bool { return fc.opens.Load() >= 1 })

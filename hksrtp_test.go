@@ -46,9 +46,9 @@ func TestForwarderProducesDecryptableStream(t *testing.T) {
 	// Shaped like a camera: its own SSRC and payload type, and a sequence
 	// space that starts somewhere arbitrary and even skips.
 	sent := []*rtp.Packet{
-		{Header: rtp.Header{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40000, Timestamp: 900000}, Payload: []byte{0x67, 0x42, 0x00, 0x1e}},
-		{Header: rtp.Header{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40001, Timestamp: 903000}, Payload: []byte{0x68, 0xce, 0x3c, 0x80}},
-		{Header: rtp.Header{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40009, Timestamp: 906000}, Payload: []byte{0x65, 0x88, 0x84, 0x00}},
+		{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40000, Timestamp: 900000, Payload: []byte{0x67, 0x42, 0x00, 0x1e}},
+		{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40001, Timestamp: 903000, Payload: []byte{0x68, 0xce, 0x3c, 0x80}},
+		{Version: 2, SSRC: 0x11111111, PayloadType: 96, SequenceNumber: 40009, Timestamp: 906000, Payload: []byte{0x65, 0x88, 0x84, 0x00}},
 	}
 
 	var firstSeq uint16
@@ -127,7 +127,7 @@ func TestForwarderWriteAfterCloseIsHarmless(t *testing.T) {
 	if err := fwd.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	p := &rtp.Packet{Header: rtp.Header{Version: 2}, Payload: []byte{1, 2, 3}}
+	p := &rtp.Packet{Version: 2, Payload: []byte{1, 2, 3}}
 	if err := fwd.WriteRTP(p); err != nil {
 		t.Errorf("WriteRTP after Close = %v, want nil", err)
 	}

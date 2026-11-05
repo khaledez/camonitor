@@ -21,7 +21,7 @@ func (c *capturingTrack) WriteRTP(p *rtp.Packet) error {
 
 func alawPacket(payload []byte) *rtp.Packet {
 	return &rtp.Packet{
-		Header:  rtp.Header{Version: 2, PayloadType: 8, SequenceNumber: 100, Timestamp: 16000},
+		Version: 2, PayloadType: 8, SequenceNumber: 100, Timestamp: 16000,
 		Payload: payload,
 	}
 }
@@ -67,7 +67,7 @@ func TestL16IsTranscodedToPCMA(t *testing.T) {
 
 	// Four big-endian samples → two A-law bytes after 2:1 decimation.
 	in := &rtp.Packet{
-		Header:  rtp.Header{Version: 2, PayloadType: 96, SequenceNumber: 7, Timestamp: 32000},
+		Version: 2, PayloadType: 96, SequenceNumber: 7, Timestamp: 32000,
 		Payload: []byte{0x10, 0x00, 0x10, 0x00, 0xF0, 0x00, 0xF0, 0x00},
 	}
 	if err := forward(in); err != nil {
@@ -95,7 +95,7 @@ func TestPCMUIsConvertedToALaw(t *testing.T) {
 	}
 
 	in := &rtp.Packet{
-		Header:  rtp.Header{Version: 2, PayloadType: 0, SequenceNumber: 3, Timestamp: 8000},
+		Version: 2, PayloadType: 0, SequenceNumber: 3, Timestamp: 8000,
 		Payload: []byte{0xFF, 0x7F, 0x00},
 	}
 	if err := forward(in); err != nil {
