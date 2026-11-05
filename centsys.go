@@ -616,16 +616,29 @@ func centsysCompleteLogin(ctx context.Context, cfg CentsysConfig, code string) e
 	}
 	token := vr.Response
 
-	// 3. List devices -> serial + MAC.
-	data, err = centsysPost(ctx, cli, centsysGatewayZA+"/GetDevicesByRemoteUserNumber?remoteUserNumber="+url.QueryEscape(cfg.Phone), token, nil)
-	if err != nil {
-		return fmt.Errorf("centsys: GetDevices: %w", err)
+	// 3. List devices -> serial + MAC. An owner who (re-)added the gate can be
+	// listed only as its admin, not a remote user, so fall back to that list.
+	phone := url.QueryEscape(cfg.Phone)
+	listings := []string{
+		"/GetDevicesByRemoteUserNumber?remoteUserNumber=" + phone,
+		"/GetDevicesByAdminNumber?adminNumber=" + phone,
 	}
 	var devices []struct {
 		SerialNumber string `json:"serialNumber"`
 		MACAddress   string `json:"macAddress"`
 	}
-	if err := json.Unmarshal(data, &devices); err != nil || len(devices) == 0 {
+	for _, listing := range listings {
+		data, err = centsysPost(ctx, cli, centsysGatewayZA+listing, token, nil)
+		if err != nil {
+			// The admin listing answers 400/404 for a number that isn't an admin anywhere.
+			log.Printf("centsys: %s: %v", listing, err)
+			continue
+		}
+		if json.Unmarshal(data, &devices) == nil && len(devices) > 0 {
+			break
+		}
+	}
+	if len(devices) == 0 {
 		return errors.New("centsys: no gate operators on this account")
 	}
 	gate := devices[0]
@@ -653,6 +666,12 @@ func centsysCompleteLogin(ctx context.Context, cfg CentsysConfig, code string) e
 	if _, err := parseMAC4(sess.Serial, sess.MAC); err != nil {
 		return err
 	}
+	// The packet key comes from the MAC, so a changed MAC silently breaks triggers.
+	var old centsysSession
+	if raw, err := os.ReadFile(cfg.sessionPath()); err == nil && json.Unmarshal(raw, &old) == nil {
+		log.Printf("centsys: previous gate %s MAC %s", old.Serial, old.MAC)
+	}
+	log.Printf("centsys: account lists gate %s MAC %s", sess.Serial, sess.MAC)
 	out, _ := json.MarshalIndent(sess, "", "  ")
 	if err := os.WriteFile(cfg.sessionPath(), out, 0o600); err != nil {
 		return fmt.Errorf("centsys: write %s: %w", cfg.sessionPath(), err)
