@@ -511,6 +511,10 @@ func (c *CentsysController) follow(ctx context.Context, cr *centsysCreds) error 
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-cli.Done():
+			// Closed on a socket error, failed keepalive or server disconnect;
+			// returning lets Run reconnect instead of serving a stale status.
+			return errors.New("broker connection lost")
 		case <-ticker.C:
 			wake()
 		}
