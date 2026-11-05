@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"log"
 
 	"github.com/brutella/hap/characteristic"
 	"github.com/brutella/hap/service"
@@ -46,8 +47,10 @@ func newHKGate(name string, gate gateController) *hkGate {
 // error so the Home app shows the command didn't land.
 func (g *hkGate) setTarget(target int) error {
 	if err := g.gate.Open(context.Background()); err != nil {
+		log.Printf("homekit gate: trigger failed: %v", err)
 		return err
 	}
+	log.Printf("homekit gate: trigger accepted")
 	// Show motion immediately; telemetry corrects it via Update.
 	if target == characteristic.TargetDoorStateOpen {
 		g.svc.CurrentDoorState.SetValue(characteristic.CurrentDoorStateOpening)
