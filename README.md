@@ -117,7 +117,7 @@ let camonitor build the Dahua-specific URLs.
 | `pass`     |          | Account password. |
 | `door`     | no       | Set `true` for door stations (VTO). Shows the "open door" button and subscribes to the Dahua bell/event stream. Leave unset for plain cameras. |
 | `codec`    | no       | Video codec delivered over RTSP: `h264` (default) or `h265`. Use `h265` for HEVC cameras (e.g. Tiandy 4K). |
-| `rtsp_path_template` | no | printf-style RTSP path with one `%d` placeholder filled with subtype+1 (1 = main/HD, 2 = sub/SD). Lets non-Dahua cameras (e.g. Tiandy `/stream1`, `/stream2`) reuse the HD/SD toggle. |
+| `rtsp_path_template` | no | printf-style RTSP path with one `%d` placeholder filled with subtype+1 (1 = main/HD, 2 = sub/SD). Lets non-Dahua cameras (e.g. Tiandy `/1/1` main, `/1/2` sub, so `"/1/%d"`) reuse the HD/SD toggle. Tiandy answers unknown paths such as `/stream2` with the main stream, so a wrong template silently serves 4K for SD too. |
 | `rtsp_url` | no       | Override for the full RTSP URL. Use this for non-Dahua cameras or non-default channels/subtypes. |
 | `door_url` | no       | Override for the door-open HTTP endpoint. Use this if your VTO firmware exposes a different path. |
 | `sip_ext`  | no       | SIP extension number to register on the VTO's built-in SIP server (e.g. `9901`). Set this to receive bell-press notifications; leave empty to disable SIP for this camera. |
@@ -430,7 +430,7 @@ Notes:
   host already binds it, the Home app will not find the bridge.
 - The Tiandy units stream H.265, which HomeKit will not take, so they
   stay web-UI-only unless they can be reconfigured to emit H.264 on
-  `stream2`.
+  `/1/2`.
 - HomeKit Secure Video is out of scope. Recording stays in the web UI and
   WhatsApp paths.
 

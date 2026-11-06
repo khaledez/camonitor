@@ -62,7 +62,7 @@
       "user": "admin",
       "pass": "REPLACE_ME",
       "codec": "h265",
-      "rtsp_path_template": "stream%d"
+      "rtsp_path_template": "/1/%d"
     },
     {
       "id": "cam2",
@@ -71,7 +71,7 @@
       "user": "admin",
       "pass": "REPLACE_ME",
       "codec": "h265",
-      "rtsp_path_template": "stream%d"
+      "rtsp_path_template": "/1/%d"
     }
   ]
 }

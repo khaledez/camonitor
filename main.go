@@ -61,7 +61,7 @@ type StreamConfig struct {
 	// RTSPPathTemplate is an optional printf-style path template with a
 	// single %d placeholder that receives subtype+1 (1 = main/HD, 2 =
 	// sub/SD). It lets non-Dahua cameras (e.g. Tiandy, whose RTSP paths are
-	// /stream1 and /stream2) reuse the same HD/SD toggle machinery.
+	// /1/1 and /1/2) reuse the same HD/SD toggle machinery.
 	RTSPPathTemplate string `json:"rtsp_path_template,omitempty"`
 
 	// Codec names the video codec this stream delivers over RTSP. "h264"
